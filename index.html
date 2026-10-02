@@ -1534,7 +1534,7 @@ async function listaRecibos(soFiltro) {
   const l = recibosCache.filter((r) => ws.every((w) => norm(`${r.cliente} ${r.descricao} ${numRecibo(r)}`).includes(w)));
   const el = $('#rc_lista'); if (!el) return;
   el.innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Nº</th><th>Cliente / descrição</th><th>Data</th><th class="num">Valor</th></tr></thead><tbody>${l.slice(0, 200).map((r) => `
-    <tr class="click" onclick='verRecibo(${JSON.stringify(r).replace(/'/g, '&#39;')})'><td><b>${numRecibo(r)}</b></td><td><span class="pn">${esc(r.cliente)}</span><div class="sub">${esc(r.descricao)}</div></td><td data-l="Data">${dataBR(r.data)}</td><td class="num" data-l="Valor"><b>${brl(r.valor)}</b></td></tr>`).join('')}</tbody></table>`
+    <tr class="click" onclick="verRecibo(recibosCache.find((x) => x.id === ${Number(r.id)}))"><td><b>${numRecibo(r)}</b></td><td><span class="pn">${esc(r.cliente)}</span><div class="sub">${esc(r.descricao)}</div></td><td data-l="Data">${dataBR(r.data)}</td><td class="num" data-l="Valor"><b>${brl(r.valor)}</b></td></tr>`).join('')}</tbody></table>`
     : '<p class="muted">Nenhum recibo emitido ainda.</p>';
 }
 function verRecibo(r) {
