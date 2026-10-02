@@ -908,7 +908,7 @@ function renderEntrada(soCalc) {
         <datalist id="dl_cat2">${categorias().map((x) => `<option value="${esc(x)}">`).join('')}</datalist>
         <div id="en_resumo" style="margin:10px 0"></div>
         <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
-          <label class="chk"><input type="checkbox" ${ent.atualizar ? 'checked' : ''} onchange="ent.atualizar=this.checked;renderEntrada(true)"> Atualizar preços de venda pelo novo custo (mantendo as margens)</label>
+          <label class="chk"><input type="checkbox" ${ent.atualizar ? 'checked' : ''} onchange="ent.atualizar=this.checked;renderEntrada(true)"> Se o custo subir, somar a diferença (R$) nos preços de atacado e varejo</label>
           <button class="btn btn-ok" id="en_go" onclick="registrarEntrada()">✔ Registrar entrada</button>
         </div>
       </div>`;
@@ -923,14 +923,17 @@ function renderEntrada(soCalc) {
     const fu = freteUnit(it, soma), vi = it.compra * impF, novo = it.compra + vi + fu, ant = p?.c ? Number(p.c.custo_final) : null;
     const ens = document.getElementById('ens_' + i); if (ens && p) ens.textContent = p.estoque + (it.qtd || 0);
     const var_ = ant ? (novo / ant - 1) * 100 : 0;
-    const na = precoPor(novo, mg.margem_atacado_pct), nv = precoPor(novo, mg.margem_varejo_pct);
+    const semPreco = !p || (!Number(p.preco_atacado) && !Number(p.preco_varejo));
+    const dif = ant != null ? r2(novo - ant) : 0;
+    const na = semPreco ? precoPor(novo, mg.margem_atacado_pct) : r2(Number(p.preco_atacado) + (dif > 0 ? dif : 0));
+    const nv = semPreco ? precoPor(novo, mg.margem_varejo_pct) : r2(Number(p.preco_varejo) + (dif > 0 ? dif : 0));
     const el = document.getElementById('enc_' + i); if (!el) return;
-    const atualiza = ent.atualizar || !p;
+    const atualiza = semPreco || (ent.atualizar && dif > 0);
     el.innerHTML = `<div class="custo-line ${ant && var_ >= 0.05 ? 'warn' : 'good'}">
       Compra ${brl(it.compra)}${ent.fora ? ` + imposto ${fp(ent.imp)}% ${brl(vi)}` : ''}${ent.frete ? ` + frete ${brl(fu)}` : ''} = <b>Custo ${brl(novo)}</b>
       ${ant ? ` · antes ${brl(ant)} ${Math.abs(var_) >= 0.05 ? `<b>(${var_ > 0 ? '+' : ''}${pct(var_)})</b>` : '(igual)'}` : ''}
-      <br>${atualiza ? `${p ? 'Novos preços' : 'Preços'} → Atacado <b>${brl(na)}</b>${p && p.preco_atacado !== na ? ` <small>(era ${brl(p.preco_atacado)})</small>` : ''} · Varejo <b>${brl(nv)}</b>${p && p.preco_varejo !== nv ? ` <small>(era ${brl(p.preco_varejo)})</small>` : ''}`
-      : `Preços mantidos → Atacado ${brl(p.preco_atacado)} (${pct(margemPor(novo, p.preco_atacado))}) · Varejo ${brl(p.preco_varejo)} (${pct(margemPor(novo, p.preco_varejo))})`}
+      <br>${atualiza ? `${semPreco ? 'Preços (margem padrão)' : `Custo subiu ${brl(dif)} → somado aos preços:`} → Atacado <b>${brl(na)}</b>${p && p.preco_atacado !== na ? ` <small>(era ${brl(p.preco_atacado)})</small>` : ''} · Varejo <b>${brl(nv)}</b>${p && p.preco_varejo !== nv ? ` <small>(era ${brl(p.preco_varejo)})</small>` : ''}`
+      : `${dif < 0 ? 'Custo caiu — preços mantidos' : 'Preços mantidos'} → Atacado ${brl(p.preco_atacado)} (${pct(margemPor(novo, p.preco_atacado))}) · Varejo ${brl(p.preco_varejo)} (${pct(margemPor(novo, p.preco_varejo))})`}
     </div>`;
   });
   const r = $('#en_resumo');
@@ -982,7 +985,7 @@ async function ultimasEntradas() {
 function editarFrete(id, frete) {
   openModal('Alterar frete da nota', `
     <label>Frete total da nota (R$)<input id="ef_v" inputmode="decimal" value="${f2(frete)}"></label>
-    <label class="chk" style="margin-top:12px"><input type="checkbox" id="ef_at" checked> Atualizar preços de venda pelo novo custo</label>
+    <label class="chk" style="margin-top:12px"><input type="checkbox" id="ef_at" checked> Se o custo subir, somar a diferença (R$) nos preços de venda</label>
     <p class="hint">O frete será redividido entre todos os itens dessa nota, proporcional ao valor de cada um.</p>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" onclick="salvarFrete(${id})">Salvar</button>`);
 }
