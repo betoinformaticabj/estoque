@@ -1684,6 +1684,7 @@ function telaFinanceiro() {
 }
 
 /* ---------- Fluxo de caixa ---------- */
+let caixaCache = [];
 async function telaCaixa() {
   $('#fin_body').innerHTML = `
     <div class="card filtros">
@@ -1708,37 +1709,49 @@ async function telaCaixa() {
       <div class="kpi"><small>Resultado do mês</small><b style="color:${ent - sai < 0 ? 'var(--bad)' : 'var(--ok)'}">${brl(ent - sai)}</b></div>
       <div class="kpi admin"><small>Saldo atual</small><b style="color:${sAnt + ent - sai < 0 ? 'var(--bad)' : ''}">${brl(sAnt + ent - sai)}</b></div>`;
     let saldo = sAnt;
+    l.forEach((x) => { saldo += (x.tipo === 'entrada' ? 1 : -1) * Number(x.valor); x._saldo = saldo; });
+    l.reverse(); caixaCache = l;
     $('#cx_l').innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Data</th><th>Descrição</th><th>Forma</th><th class="num">Valor</th><th class="num">Saldo</th><th></th></tr></thead><tbody>
-      ${l.map((x) => { saldo += (x.tipo === 'entrada' ? 1 : -1) * Number(x.valor); return `<tr>
+      ${l.map((x) => { const saldo = x._saldo; return `<tr>
         <td>${dataBR(x.data)}</td>
         <td><span class="pn">${esc(x.descricao)}</span><div class="sub">${esc([x.categoria, x.usuario].filter(Boolean).join(' · '))}</div></td>
         <td data-l="Forma">${esc(x.forma || '')}</td>
         <td class="num" data-l="Valor"><b style="color:${x.tipo === 'entrada' ? 'var(--ok)' : 'var(--bad)'}">${x.tipo === 'entrada' ? '+' : '−'} ${brl(x.valor)}</b></td>
         <td class="num" data-l="Saldo">${brl(saldo)}</td>
-        <td class="num">${x.venda_id ? `<button class="btn btn-sm" onclick="verVenda(${x.venda_id})">Venda</button> ` : ''}<button class="btn btn-sm btn-danger" onclick="excluirCaixa(${x.id},${x.conta_id ? 1 : 0})">Excluir</button></td></tr>`; }).join('')}
+        <td class="num">${x.venda_id ? `<button class="btn btn-sm" onclick="verVenda(${x.venda_id})">Venda</button> ` : ''}<button class="btn btn-sm" onclick="formCaixa('${x.tipo}',${x.id})">Editar</button> <button class="btn btn-sm btn-danger" onclick="excluirCaixa(${x.id},${x.conta_id ? 1 : 0})">Excluir</button></td></tr>`; }).join('')}
       </tbody></table>` : '<p class="muted">Nenhum lançamento neste mês.</p>';
   } catch (e) { erro(e); }
 }
-function formCaixa(tipo) {
+function formCaixa(tipo, id) {
+  const x = id ? caixaCache.find((c) => c.id === id) : null;
+  if (x) tipo = x.tipo;
   const cats = tipo === 'entrada' ? CAT_ENT : CAT_SAI;
-  openModal(tipo === 'entrada' ? '+ Entrada no caixa' : '− Saída do caixa', `
+  const travado = !!x?.conta_id;
+  const formas = x?.forma && !FORMAS.includes(x.forma) ? [x.forma, ...FORMAS] : FORMAS;
+  openModal(x ? `Editar ${tipo === 'entrada' ? 'entrada' : 'saída'}` : (tipo === 'entrada' ? '+ Entrada no caixa' : '− Saída do caixa'), `
     <div class="grid2">
-      <label>Data<input id="cf_data" type="date" value="${hojeISO()}"></label>
-      <label>Valor (R$) *<input id="cf_val" inputmode="decimal" placeholder="0,00"></label>
-      <label class="full">Descrição *<input id="cf_desc" placeholder="${tipo === 'entrada' ? 'Ex.: Serviço de formatação' : 'Ex.: Conta de energia'}"></label>
-      <label>Categoria<input id="cf_cat" list="dl_cfcat"><datalist id="dl_cfcat">${cats.map((c) => `<option value="${c}">`).join('')}</datalist></label>
-      <label>Forma<select id="cf_forma"><option></option>${FORMAS.map((f) => `<option>${f}</option>`).join('')}</select></label>
-    </div>`,
-    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn ${tipo === 'entrada' ? 'btn-ok' : 'btn-danger'}" id="cf_go" onclick="salvarCaixa('${tipo}')">Salvar</button>`);
+      <label>Tipo<select id="cf_tipo" ${travado ? 'disabled' : ''}><option value="entrada" ${tipo === 'entrada' ? 'selected' : ''}>Entrada (+)</option><option value="saida" ${tipo === 'saida' ? 'selected' : ''}>Saída (−)</option></select></label>
+      <label>Data<input id="cf_data" type="date" value="${x?.data || hojeISO()}"></label>
+      <label class="full">Descrição *<input id="cf_desc" value="${esc(x?.descricao || '')}" placeholder="${tipo === 'entrada' ? 'Ex.: Serviço de formatação' : 'Ex.: Conta de energia'}"></label>
+      <label>Valor (R$) *<input id="cf_val" inputmode="decimal" value="${x ? f2(x.valor) : ''}" placeholder="0,00" ${travado ? 'disabled' : ''}></label>
+      <label>Categoria<input id="cf_cat" list="dl_cfcat" value="${esc(x?.categoria || '')}"><datalist id="dl_cfcat">${[...CAT_ENT, ...CAT_SAI].filter((c, i, a) => a.indexOf(c) === i).map((c) => `<option value="${c}">`).join('')}</datalist></label>
+      <label>Forma<select id="cf_forma"><option></option>${formas.map((f) => `<option ${x?.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+    </div>
+    ${travado ? '<p class="hint">Este lançamento veio da baixa de uma conta. Para mudar o valor, use "Desfazer baixa" na conta e dê baixa de novo.</p>' : ''}
+    ${x?.venda_id ? `<p class="hint">Lançamento da venda #${x.venda_id}. Alterar aqui muda só o caixa, não a venda.</p>` : ''}`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="cf_go" onclick="salvarCaixa(${x ? x.id : 'null'})">Salvar</button>`);
 }
-async function salvarCaixa(tipo) {
+async function salvarCaixa(id) {
   const v = num($('#cf_val').value), d = $('#cf_desc').value.trim();
   if (!d) return toast('Informe a descrição', 'erro');
   if (!(v > 0)) return toast('Informe o valor', 'erro');
+  const body = { data: $('#cf_data').value || hojeISO(), descricao: d, categoria: $('#cf_cat').value.trim() || null, forma: $('#cf_forma').value || null };
+  if (!$('#cf_val').disabled) body.valor = r2(v);
+  if (!$('#cf_tipo').disabled) body.tipo = $('#cf_tipo').value;
   $('#cf_go').disabled = true;
-  const { error } = await sb.from('caixa').insert({ tipo, data: $('#cf_data').value || hojeISO(), descricao: d, categoria: $('#cf_cat').value.trim() || null, valor: r2(v), forma: $('#cf_forma').value || null, usuario: me.nome });
+  const { error } = id ? await sb.from('caixa').update(body).eq('id', id) : await sb.from('caixa').insert({ ...body, usuario: me.nome });
   if (error) { $('#cf_go').disabled = false; return erro(error); }
-  closeModal(); toast('Lançamento salvo ✔'); telaCaixa();
+  closeModal(); toast(id ? 'Lançamento alterado ✔' : 'Lançamento salvo ✔'); telaCaixa();
 }
 async function excluirCaixa(id, deConta) {
   if (deConta) return toast('Este lançamento veio da baixa de uma conta. Para tirar, use "Desfazer baixa" em Contas a pagar/receber.', 'erro');
@@ -1789,7 +1802,7 @@ async function listaContas(tipo, soFiltro) {
         <td data-l="Situação">${statusConta(c)}</td>
         <td class="num">${c.venda_id ? `<button class="btn btn-sm" onclick="verVenda(${c.venda_id})">Venda</button> ` : ''}${c.pago_em
           ? `<button class="btn btn-sm" onclick="estornarConta(${c.id},'${tipo}')">Desfazer baixa</button>`
-          : `<button class="btn btn-sm btn-ok" onclick="formBaixa(${c.id},'${tipo}')">${R ? 'Receber' : 'Pagar'}</button> ${c.venda_id ? '' : `<button class="btn btn-sm btn-danger" onclick="excluirConta(${c.id},'${tipo}')">Excluir</button>`}`}</td></tr>`).join('')}
+          : `<button class="btn btn-sm btn-ok" onclick="formBaixa(${c.id},'${tipo}')">${R ? 'Receber' : 'Pagar'}</button> <button class="btn btn-sm" onclick="editarConta(${c.id},'${tipo}')">Editar</button> ${c.venda_id ? '' : `<button class="btn btn-sm btn-danger" onclick="excluirConta(${c.id},'${tipo}')">Excluir</button>`}`}</td></tr>`).join('')}
       </tbody></table>` : `<p class="muted">Nenhuma conta ${st === 'todas' ? '' : 'nesta situação'}.</p>`;
   } catch (e) { erro(e); }
 }
@@ -1863,6 +1876,33 @@ async function estornarConta(id, tipo) {
   const { error } = await sb.rpc('estornar_conta', { p_id: id });
   if (error) return erro(error);
   toast('Baixa desfeita'); listaContas(tipo);
+}
+function editarConta(id, tipo) {
+  const c = contasCache.find((x) => x.id === id), R = tipo === 'receber';
+  const cats = R ? ['Serviço', 'Venda a prazo', 'Contrato mensal', 'Outros'] : CAT_SAI;
+  openModal(`Editar conta a ${R ? 'receber' : 'pagar'}${c.parcela ? ' (' + esc(c.parcela) + ')' : ''}`, `
+    <div class="grid2">
+      <label class="full">Descrição *<input id="ec_desc" value="${esc(c.descricao)}"></label>
+      <label>${R ? 'Cliente' : 'Fornecedor / a quem pagar'}<input id="ec_pes" value="${esc(c.pessoa || '')}" ${R ? 'list="dl_eccli"' : ''}>${R ? `<datalist id="dl_eccli">${clientes.map((x) => `<option value="${esc(x.nome)}">`).join('')}</datalist>` : ''}</label>
+      <label>Categoria<input id="ec_cat" list="dl_eccat" value="${esc(c.categoria || '')}"><datalist id="dl_eccat">${cats.map((x) => `<option value="${x}">`).join('')}</datalist></label>
+      <label>Valor (R$) *<input id="ec_val" inputmode="decimal" value="${f2(c.valor)}"></label>
+      <label>Vencimento *<input id="ec_venc" type="date" value="${c.vencimento}"></label>
+      <label class="full">Observação<input id="ec_obs" value="${esc(c.observacao || '')}"></label>
+    </div>
+    ${c.venda_id ? `<p class="hint">Parcela da venda #${c.venda_id}. Alterar aqui muda só a conta a receber, não a venda.</p>` : ''}`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="ec_go" onclick="salvarEdicaoConta(${id},'${tipo}')">Salvar</button>`);
+}
+async function salvarEdicaoConta(id, tipo) {
+  const d = $('#ec_desc').value.trim(), v = num($('#ec_val').value);
+  if (!d) return toast('Informe a descrição', 'erro');
+  if (!(v > 0)) return toast('Informe o valor', 'erro');
+  if (!$('#ec_venc').value) return toast('Informe o vencimento', 'erro');
+  const pes = $('#ec_pes').value.trim(), cli = tipo === 'receber' ? clientes.find((c) => norm(c.nome) === norm(pes)) : null;
+  const old = contasCache.find((x) => x.id === id);
+  $('#ec_go').disabled = true;
+  const { error } = await sb.from('contas').update({ descricao: d, pessoa: pes || null, cliente_id: cli?.id || (old.venda_id ? old.cliente_id : null), categoria: $('#ec_cat').value.trim() || null, valor: r2(v), vencimento: $('#ec_venc').value, observacao: $('#ec_obs').value.trim() || null }).eq('id', id);
+  if (error) { $('#ec_go').disabled = false; return erro(error); }
+  closeModal(); toast('Conta alterada ✔'); listaContas(tipo);
 }
 async function excluirConta(id, tipo) {
   if (!confirm('Excluir esta conta?')) return;
