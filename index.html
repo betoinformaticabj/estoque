@@ -35,7 +35,7 @@ small{color:var(--muted)}
 .user{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--silver)}
 .tabs{display:flex;gap:4px;background:var(--dark2);padding:0 12px;overflow-x:auto;scrollbar-width:none;position:sticky;top:0;z-index:20}
 .tabs::-webkit-scrollbar{display:none}
-.tabs button{background:none;border:0;color:var(--silver);padding:12px 14px;cursor:pointer;white-space:nowrap;border-bottom:3px solid transparent;font-weight:600}
+.tabs button{background:none;border:0;color:var(--silver);padding:12px 11px;cursor:pointer;white-space:nowrap;border-bottom:3px solid transparent;font-weight:600}
 .tabs button.on{color:#fff;border-bottom-color:var(--blue)}
 main{max-width:1180px;margin:0 auto;padding:18px 16px 80px}
 .pagehead{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:14px}
@@ -173,6 +173,8 @@ textarea{min-height:64px;resize:vertical}
 @media print{
   body>*:not(#print-area){display:none!important}
   #print-area{display:block;padding:10px;color:#000}
+  html,body{background:#fff!important}
+  #print-area h3{color:#222}
   #print-area table{width:100%;border-collapse:collapse}
   #print-area td,#print-area th{border-bottom:1px solid #999;padding:5px;text-align:left}
 }
@@ -420,6 +422,7 @@ async function carregarBase() {
   const mc = new Map(cs.map((x) => [x.produto_id, x]));
   produtos = ps.map((p) => ({ ...p, c: mc.get(p.id) || null }));
   clientes = cls;
+  try { await carregarBancos(); } catch (e) { bancos = []; catsFin = []; }
 }
 async function recarregarProdutos() {
   const [ps, cs] = await Promise.all([
@@ -440,6 +443,7 @@ const ABAS = [
   { id: 'vendas', nome: 'Vendas', ic: '📈' },
   { id: 'recibos', nome: 'Recibos', ic: '🧾' },
   { id: 'financeiro', nome: 'Financeiro', ic: '💰', admin: true },
+  { id: 'relatorios', nome: 'Relatórios', ic: '📊', admin: true },
   { id: 'config', nome: 'Configurações', ic: '⚙️', admin: true },
 ];
 function renderShell() {
@@ -457,7 +461,7 @@ function ir(id) {
   aba = id;
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.aba === id));
   const m = $('#main'); m.innerHTML = '';
-  ({ painel: telaPainel, vender: telaVender, produtos: telaProdutos, entrada: telaEntrada, clientes: telaClientes, vendas: telaVendas, recibos: telaRecibos, financeiro: telaFinanceiro, config: telaConfig })[id]();
+  ({ painel: telaPainel, vender: telaVender, produtos: telaProdutos, entrada: telaEntrada, clientes: telaClientes, vendas: telaVendas, recibos: telaRecibos, financeiro: telaFinanceiro, relatorios: telaRelatorios, config: telaConfig })[id]();
   window.scrollTo(0, 0);
 }
 
@@ -1079,7 +1083,8 @@ function renderPagVenda() {
     : `
       <label>Forma de pagamento<select id="vd_forma" onchange="venda.forma=this.value">${FORMAS.map((f) => `<option ${venda.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
       <label style="margin-top:10px">Lançar esta venda no fluxo de caixa?</label>
-      <div class="seg" style="margin:4px 0 0"><button class="${venda.caixa === true ? 'on' : ''}" onclick="venda.caixa=true;renderPagVenda()">✔ Sim</button><button class="${venda.caixa === false ? 'on' : ''}" onclick="venda.caixa=false;renderPagVenda()">Não</button></div>`}`;
+      <div class="seg" style="margin:4px 0 0"><button class="${venda.caixa === true ? 'on' : ''}" onclick="venda.caixa=true;renderPagVenda()">✔ Sim</button><button class="${venda.caixa === false ? 'on' : ''}" onclick="venda.caixa=false;renderPagVenda()">Não</button></div>
+      ${venda.caixa === true && bancos.length ? `<label style="margin-top:10px">Entrou em (conta / banco)${bancoSel('vd_banco', venda.banco ?? null, 'onchange="venda.banco=+this.value"')}</label>` : ''}`}`;
   totalVenda();
 }
 function renderCliVenda() {
@@ -1226,6 +1231,7 @@ async function finalizarVenda() {
     p_forma: sd ? null : venda.forma, p_obs: venda.obs, p_tipo: venda.tipo, p_destino: sd ? venda.destino : null,
     p_condicao: venda.cond, p_caixa: !sd && venda.cond === 'avista' && venda.caixa === true,
     p_parcelas: venda.parcelas || 1, p_vencimento: venda.cond === 'prazo' ? venda.venc : null,
+    p_banco: (!sd && venda.cond === 'avista' && venda.caixa === true) ? (+$('#vd_banco')?.value || bancoPadrao()) : null,
   });
   if (error) { b.disabled = false; return erro(error); }
   venda = vendaNova(venda.tipo);
@@ -1618,22 +1624,47 @@ function pdfRecibo(r, modo) {
 
 /* ====================== FINANCEIRO ====================== */
 let finAba = 'caixa';
-let finFil = { mes: '', status: 'aberta', busca: '' };
-const CAT_ENT = ['Venda', 'Serviço', 'Recebimento', 'Aporte / saldo inicial', 'Outros'];
-const CAT_SAI = ['Fornecedor / compra', 'Aluguel', 'Energia', 'Água', 'Internet / telefone', 'Salário', 'Impostos', 'Frete', 'Combustível', 'Retirada (pró-labore)', 'Manutenção', 'Outros'];
+let finFil = { mes: '', status: 'aberta', busca: '', banco: '' };
+let bancos = [], catsFin = [];
 const mesAtual = () => hojeISO().slice(0, 7);
 const fimMes = (m) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm, 0); return `${m}-${String(d.getDate()).padStart(2, '0')}`; };
 const diasAte = (iso) => Math.round((inicioDia(iso) - inicioDia(hojeISO())) / 864e5);
+const sinal = (x) => (x.tipo === 'entrada' ? 1 : -1) * Number(x.valor);
+const bancoPadrao = () => bancos.filter((b) => b.ativo).sort((a, b) => a.ordem - b.ordem || a.id - b.id)[0]?.id || null;
+const nomeBanco = (id) => bancos.find((b) => b.id === id)?.nome || '—';
+async function carregarBancos() {
+  const [b, c] = await Promise.all([
+    fetchAll(() => sb.from('bancos').select('*').order('ordem').order('id')),
+    isAdmin ? fetchAll(() => sb.from('categorias').select('*').order('nome')) : Promise.resolve([]),
+  ]);
+  bancos = b; catsFin = c;
+}
+function bancoSel(id, sel, extra = '') {
+  const l = bancos.filter((b) => b.ativo || b.id === sel);
+  const v = sel ?? bancoPadrao();
+  return `<select id="${id}" ${extra}>${l.map((b) => `<option value="${b.id}" ${b.id === v ? 'selected' : ''}>${esc(b.nome)}</option>`).join('')}</select>`;
+}
+function catSel(id, tipo, sel) {
+  const l = catsFin.filter((c) => (c.ativo && (c.tipo === tipo || c.tipo === 'ambos' || !tipo)) || c.nome === sel).map((c) => c.nome);
+  if (sel && !l.includes(sel)) l.unshift(sel);
+  return `<select id="${id}"><option value="">(sem categoria)</option>${l.map((n) => `<option ${n === sel ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>`;
+}
+async function saldosBancos() {
+  const cx = await fetchAll(() => sb.from('caixa').select('tipo,valor,banco_id'));
+  const m = new Map(bancos.map((b) => [b.id, Number(b.saldo_inicial) || 0]));
+  cx.forEach((x) => m.set(x.banco_id, (m.get(x.banco_id) || 0) + sinal(x)));
+  return m;
+}
 
 async function painelFinanceiro() {
   try {
     const hoje = hojeISO(), em7 = maisDias(7);
-    const [cx, rec, pag] = await Promise.all([
-      fetchAll(() => sb.from('caixa').select('tipo,valor')),
+    const [sm_, rec, pag] = await Promise.all([
+      saldosBancos(),
       fetchAll(() => sb.from('contas').select('valor').eq('tipo', 'receber').is('pago_em', null).lt('vencimento', hoje)),
       fetchAll(() => sb.from('contas').select('valor').eq('tipo', 'pagar').is('pago_em', null).lte('vencimento', em7)),
     ]);
-    const saldo = cx.reduce((s, x) => s + (x.tipo === 'entrada' ? 1 : -1) * Number(x.valor), 0);
+    const saldo = [...sm_.values()].reduce((s, v) => s + v, 0);
     const sm = (a) => a.reduce((s, x) => s + Number(x.valor), 0);
     if ($('#k_caixa')) { $('#k_caixa').textContent = brl(saldo); $('#k_caixa').style.color = saldo < 0 ? 'var(--bad)' : ''; }
     if ($('#k_rec')) { $('#k_rec').textContent = brl(sm(rec)); $('#k_rec').style.color = sm(rec) ? 'var(--warn)' : ''; }
@@ -1643,20 +1674,21 @@ async function painelFinanceiro() {
 
 async function vendaFinanceiro(v) {
   const [cx, ct] = await Promise.all([
-    sb.from('caixa').select('id,data,valor,forma').eq('venda_id', v.id),
+    sb.from('caixa').select('id,data,valor,forma,banco_id').eq('venda_id', v.id),
     sb.from('contas').select('*').eq('venda_id', v.id).order('vencimento'),
   ]);
   const el = $('#vv_fin'); if (!el) return;
   if (ct.data?.length) {
     el.innerHTML = `<h3>Contas a receber desta venda</h3><table class="tbl"><tbody>${ct.data.map((c) => `<tr><td>${c.parcela ? esc(c.parcela) : 'Parcela única'}</td><td data-l="Vencimento">${dataBR(c.vencimento)}</td><td class="num" data-l="Valor">${brl(c.valor)}</td><td class="num">${statusConta(c)}</td></tr>`).join('')}</tbody></table>`;
   } else if (cx.data?.length) {
-    el.innerHTML = `<div class="alert ok" style="margin-top:10px">✔ Lançada no fluxo de caixa em ${dataBR(cx.data[0].data)}${cx.data[0].forma ? ' · ' + esc(cx.data[0].forma) : ''}.</div>`;
+    el.innerHTML = `<div class="alert ok" style="margin-top:10px">✔ Lançada no fluxo de caixa em ${dataBR(cx.data[0].data)} · <b>${esc(nomeBanco(cx.data[0].banco_id))}</b>${cx.data[0].forma ? ' · ' + esc(cx.data[0].forma) : ''}.</div>`;
   } else {
-    el.innerHTML = `<div class="alert info" style="margin-top:10px">Esta venda <b>não está</b> no fluxo de caixa. <button class="chipbtn" onclick="vendaParaCaixa(${v.id})">💰 Lançar no caixa agora</button></div>`;
+    el.innerHTML = `<div class="alert info" style="margin-top:10px">Esta venda <b>não está</b> no fluxo de caixa. Lançar em ${bancoSel('vv_banco')} <button class="chipbtn" onclick="vendaParaCaixa(${v.id})">💰 Lançar no caixa agora</button></div>`;
+    $('#vv_banco').style.width = 'auto';
   }
 }
 async function vendaParaCaixa(id) {
-  const { error } = await sb.rpc('venda_para_caixa', { p_id: id, p_forma: null });
+  const { error } = await sb.rpc('venda_para_caixa', { p_id: id, p_forma: null, p_banco: +$('#vv_banco').value || null });
   if (error) return erro(error);
   toast('Venda lançada no caixa ✔'); verVenda(id);
 }
@@ -1670,82 +1702,100 @@ function statusConta(c) {
   return `<span class="tag">Em aberto</span>`;
 }
 
-function telaFinanceiro() {
+async function telaFinanceiro() {
   if (!finFil.mes) finFil.mes = mesAtual();
   $('#main').innerHTML = `
     <div class="pagehead"><h1>Financeiro</h1></div>
-    <div class="seg" style="max-width:620px">
+    <div class="seg" style="max-width:860px;overflow-x:auto">
       <button class="${finAba === 'caixa' ? 'on' : ''}" onclick="finAba='caixa';telaFinanceiro()">💵 Fluxo de caixa</button>
       <button class="${finAba === 'pagar' ? 'on' : ''}" onclick="finAba='pagar';telaFinanceiro()">📤 Contas a pagar</button>
       <button class="${finAba === 'receber' ? 'on' : ''}" onclick="finAba='receber';telaFinanceiro()">📥 Contas a receber</button>
+      <button class="${finAba === 'cadastros' ? 'on' : ''}" onclick="finAba='cadastros';telaFinanceiro()">🏦 Bancos e categorias</button>
     </div>
-    <div id="fin_body"></div>`;
-  if (finAba === 'caixa') telaCaixa(); else telaContas(finAba);
+    <div id="fin_body"><p class="muted">Carregando…</p></div>`;
+  try { await carregarBancos(); } catch (e) { return erro(e); }
+  if (finAba === 'caixa') telaCaixa(); else if (finAba === 'cadastros') telaCadastrosFin(); else telaContas(finAba);
 }
 
 /* ---------- Fluxo de caixa ---------- */
 let caixaCache = [];
 async function telaCaixa() {
+  const bf = finFil.banco ? +finFil.banco : null;
   $('#fin_body').innerHTML = `
+    <div class="kpis" id="cx_bancos"></div>
     <div class="card filtros">
       <label style="flex-direction:row;align-items:center;gap:8px">Mês <input type="month" value="${finFil.mes}" style="width:auto" onchange="finFil.mes=this.value||mesAtual();telaCaixa()"></label>
-      <div class="actions" style="margin-left:auto"><button class="btn btn-ok" onclick="formCaixa('entrada')">+ Entrada</button><button class="btn btn-danger" onclick="formCaixa('saida')">− Saída</button></div>
+      <select style="flex:0 1 220px" onchange="finFil.banco=this.value;telaCaixa()"><option value="">Todas as contas</option>${bancos.map((b) => `<option value="${b.id}" ${bf === b.id ? 'selected' : ''}>${esc(b.nome)}${b.ativo ? '' : ' (inativa)'}</option>`).join('')}</select>
+      <div class="actions" style="margin-left:auto"><button class="btn btn-ok" onclick="formCaixa('entrada')">+ Entrada</button><button class="btn btn-danger" onclick="formCaixa('saida')">− Saída</button><button class="btn" onclick="formTransf()">⇄ Transferir</button></div>
     </div>
     <div class="kpis" id="cx_k"></div>
     <div class="card" id="cx_l"><p class="muted">Carregando…</p></div>`;
   try {
     const ini = `${finFil.mes}-01`, fim = fimMes(finFil.mes);
-    const [ant, l] = await Promise.all([
-      fetchAll(() => sb.from('caixa').select('tipo,valor').lt('data', ini)),
+    const [todos, l0] = await Promise.all([
+      fetchAll(() => sb.from('caixa').select('tipo,valor,banco_id,data')),
       fetchAll(() => sb.from('caixa').select('*').gte('data', ini).lte('data', fim).order('data').order('id')),
     ]);
-    const sAnt = ant.reduce((s, x) => s + (x.tipo === 'entrada' ? 1 : -1) * Number(x.valor), 0);
-    const ent = l.filter((x) => x.tipo === 'entrada').reduce((s, x) => s + Number(x.valor), 0);
-    const sai = l.filter((x) => x.tipo === 'saida').reduce((s, x) => s + Number(x.valor), 0);
+    const saldoB = new Map(bancos.map((b) => [b.id, Number(b.saldo_inicial) || 0]));
+    todos.forEach((x) => saldoB.set(x.banco_id, (saldoB.get(x.banco_id) || 0) + sinal(x)));
+    const tot = [...saldoB.values()].reduce((s, v) => s + v, 0);
+    $('#cx_bancos').innerHTML = bancos.filter((b) => b.ativo || Math.abs(saldoB.get(b.id) || 0) > 0.004).map((b) => {
+      const v = saldoB.get(b.id) || 0;
+      return `<div class="kpi" style="cursor:pointer;${bf === b.id ? 'border-color:var(--blue);background:var(--blue-l)' : ''}" onclick="finFil.banco='${bf === b.id ? '' : b.id}';telaCaixa()"><small>🏦 ${esc(b.nome)}</small><b style="color:${v < 0 ? 'var(--bad)' : ''}">${brl(v)}</b></div>`;
+    }).join('') + `<div class="kpi admin" style="cursor:pointer" onclick="finFil.banco='';telaCaixa()"><small>Total em todas as contas</small><b style="color:${tot < 0 ? 'var(--bad)' : ''}">${brl(tot)}</b></div>`;
+    const naConta = (x) => !bf || x.banco_id === bf;
+    const inicial = bf ? Number(bancos.find((b) => b.id === bf)?.saldo_inicial || 0) : bancos.reduce((s, b) => s + Number(b.saldo_inicial || 0), 0);
+    const sAnt = inicial + todos.filter((x) => x.data < ini && naConta(x)).reduce((s, x) => s + sinal(x), 0);
+    const l = l0.filter(naConta);
+    const conta = (x) => bf || x.categoria !== 'Transferência';
+    const ent = l.filter((x) => x.tipo === 'entrada' && conta(x)).reduce((s, x) => s + Number(x.valor), 0);
+    const sai = l.filter((x) => x.tipo === 'saida' && conta(x)).reduce((s, x) => s + Number(x.valor), 0);
     $('#cx_k').innerHTML = `
       <div class="kpi"><small>Saldo anterior</small><b>${brl(sAnt)}</b></div>
       <div class="kpi"><small>Entradas no mês</small><b style="color:var(--ok)">${brl(ent)}</b></div>
       <div class="kpi"><small>Saídas no mês</small><b style="color:var(--bad)">${brl(sai)}</b></div>
       <div class="kpi"><small>Resultado do mês</small><b style="color:${ent - sai < 0 ? 'var(--bad)' : 'var(--ok)'}">${brl(ent - sai)}</b></div>
-      <div class="kpi admin"><small>Saldo atual</small><b style="color:${sAnt + ent - sai < 0 ? 'var(--bad)' : ''}">${brl(sAnt + ent - sai)}</b></div>`;
+      <div class="kpi admin"><small>Saldo no fim do mês${bf ? ' · ' + esc(nomeBanco(bf)) : ''}</small><b style="color:${sAnt + ent - sai < 0 ? 'var(--bad)' : ''}">${brl(sAnt + l.reduce((s, x) => s + sinal(x), 0))}</b></div>`;
     let saldo = sAnt;
-    l.forEach((x) => { saldo += (x.tipo === 'entrada' ? 1 : -1) * Number(x.valor); x._saldo = saldo; });
+    l.forEach((x) => { saldo += sinal(x); x._saldo = saldo; });
     l.reverse(); caixaCache = l;
-    $('#cx_l').innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Data</th><th>Descrição</th><th>Forma</th><th class="num">Valor</th><th class="num">Saldo</th><th></th></tr></thead><tbody>
-      ${l.map((x) => { const saldo = x._saldo; return `<tr>
+    $('#cx_l').innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th class="num">Valor</th><th class="num">Saldo</th><th></th></tr></thead><tbody>
+      ${l.map((x) => `<tr>
         <td>${dataBR(x.data)}</td>
-        <td><span class="pn">${esc(x.descricao)}</span><div class="sub">${esc([x.categoria, x.usuario].filter(Boolean).join(' · '))}</div></td>
-        <td data-l="Forma">${esc(x.forma || '')}</td>
+        <td><span class="pn">${esc(x.descricao)}</span><div class="sub">${esc([x.categoria, x.forma, x.usuario].filter(Boolean).join(' · '))}</div></td>
+        <td data-l="Conta">${esc(nomeBanco(x.banco_id))}</td>
         <td class="num" data-l="Valor"><b style="color:${x.tipo === 'entrada' ? 'var(--ok)' : 'var(--bad)'}">${x.tipo === 'entrada' ? '+' : '−'} ${brl(x.valor)}</b></td>
-        <td class="num" data-l="Saldo">${brl(saldo)}</td>
-        <td class="num">${x.venda_id ? `<button class="btn btn-sm" onclick="verVenda(${x.venda_id})">Venda</button> ` : ''}<button class="btn btn-sm" onclick="formCaixa('${x.tipo}',${x.id})">Editar</button> <button class="btn btn-sm btn-danger" onclick="excluirCaixa(${x.id},${x.conta_id ? 1 : 0})">Excluir</button></td></tr>`; }).join('')}
+        <td class="num" data-l="Saldo">${brl(x._saldo)}</td>
+        <td class="num">${x.venda_id ? `<button class="btn btn-sm" onclick="verVenda(${x.venda_id})">Venda</button> ` : ''}${x.transf ? '' : `<button class="btn btn-sm" onclick="formCaixa('${x.tipo}',${x.id})">Editar</button> `}<button class="btn btn-sm btn-danger" onclick="excluirCaixa(${x.id})">Excluir</button></td></tr>`).join('')}
       </tbody></table>` : '<p class="muted">Nenhum lançamento neste mês.</p>';
   } catch (e) { erro(e); }
 }
 function formCaixa(tipo, id) {
   const x = id ? caixaCache.find((c) => c.id === id) : null;
   if (x) tipo = x.tipo;
-  const cats = tipo === 'entrada' ? CAT_ENT : CAT_SAI;
   const travado = !!x?.conta_id;
   const formas = x?.forma && !FORMAS.includes(x.forma) ? [x.forma, ...FORMAS] : FORMAS;
   openModal(x ? `Editar ${tipo === 'entrada' ? 'entrada' : 'saída'}` : (tipo === 'entrada' ? '+ Entrada no caixa' : '− Saída do caixa'), `
     <div class="grid2">
-      <label>Tipo<select id="cf_tipo" ${travado ? 'disabled' : ''}><option value="entrada" ${tipo === 'entrada' ? 'selected' : ''}>Entrada (+)</option><option value="saida" ${tipo === 'saida' ? 'selected' : ''}>Saída (−)</option></select></label>
+      <label>Tipo<select id="cf_tipo" ${travado ? 'disabled' : ''} onchange="$('#cf_catw').innerHTML=catSel('cf_cat',this.value,$('#cf_cat').value)"><option value="entrada" ${tipo === 'entrada' ? 'selected' : ''}>Entrada (+)</option><option value="saida" ${tipo === 'saida' ? 'selected' : ''}>Saída (−)</option></select></label>
       <label>Data<input id="cf_data" type="date" value="${x?.data || hojeISO()}"></label>
       <label class="full">Descrição *<input id="cf_desc" value="${esc(x?.descricao || '')}" placeholder="${tipo === 'entrada' ? 'Ex.: Serviço de formatação' : 'Ex.: Conta de energia'}"></label>
       <label>Valor (R$) *<input id="cf_val" inputmode="decimal" value="${x ? f2(x.valor) : ''}" placeholder="0,00" ${travado ? 'disabled' : ''}></label>
-      <label>Categoria<input id="cf_cat" list="dl_cfcat" value="${esc(x?.categoria || '')}"><datalist id="dl_cfcat">${[...CAT_ENT, ...CAT_SAI].filter((c, i, a) => a.indexOf(c) === i).map((c) => `<option value="${c}">`).join('')}</datalist></label>
+      <label>Conta / banco *${bancoSel('cf_banco', x?.banco_id)}</label>
+      <label>Categoria<span id="cf_catw">${catSel('cf_cat', tipo, x?.categoria)}</span></label>
       <label>Forma<select id="cf_forma"><option></option>${formas.map((f) => `<option ${x?.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
     </div>
     ${travado ? '<p class="hint">Este lançamento veio da baixa de uma conta. Para mudar o valor, use "Desfazer baixa" na conta e dê baixa de novo.</p>' : ''}
-    ${x?.venda_id ? `<p class="hint">Lançamento da venda #${x.venda_id}. Alterar aqui muda só o caixa, não a venda.</p>` : ''}`,
+    ${x?.venda_id ? `<p class="hint">Lançamento da venda #${x.venda_id}. Alterar aqui muda só o caixa, não a venda.</p>` : ''}
+    <p class="hint">Faltou categoria ou banco? Cadastre em <b>Financeiro → 🏦 Bancos e categorias</b>.</p>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="cf_go" onclick="salvarCaixa(${x ? x.id : 'null'})">Salvar</button>`);
 }
 async function salvarCaixa(id) {
   const v = num($('#cf_val').value), d = $('#cf_desc').value.trim();
   if (!d) return toast('Informe a descrição', 'erro');
   if (!(v > 0)) return toast('Informe o valor', 'erro');
-  const body = { data: $('#cf_data').value || hojeISO(), descricao: d, categoria: $('#cf_cat').value.trim() || null, forma: $('#cf_forma').value || null };
+  if (!$('#cf_banco').value) return toast('Cadastre um banco/conta primeiro', 'erro');
+  const body = { data: $('#cf_data').value || hojeISO(), descricao: d, categoria: $('#cf_cat').value || null, forma: $('#cf_forma').value || null, banco_id: +$('#cf_banco').value };
   if (!$('#cf_val').disabled) body.valor = r2(v);
   if (!$('#cf_tipo').disabled) body.tipo = $('#cf_tipo').value;
   $('#cf_go').disabled = true;
@@ -1753,12 +1803,125 @@ async function salvarCaixa(id) {
   if (error) { $('#cf_go').disabled = false; return erro(error); }
   closeModal(); toast(id ? 'Lançamento alterado ✔' : 'Lançamento salvo ✔'); telaCaixa();
 }
-async function excluirCaixa(id, deConta) {
-  if (deConta) return toast('Este lançamento veio da baixa de uma conta. Para tirar, use "Desfazer baixa" em Contas a pagar/receber.', 'erro');
-  if (!confirm('Excluir este lançamento do caixa?')) return;
-  const { error } = await sb.from('caixa').delete().eq('id', id);
+async function excluirCaixa(id) {
+  const x = caixaCache.find((c) => c.id === id);
+  if (x?.conta_id) return toast('Este lançamento veio da baixa de uma conta. Para tirar, use "Desfazer baixa" em Contas a pagar/receber.', 'erro');
+  if (!confirm(x?.transf ? 'Excluir esta transferência? Os dois lançamentos (saída e entrada) serão apagados.' : 'Excluir este lançamento do caixa?')) return;
+  const { error } = x?.transf ? await sb.from('caixa').delete().eq('transf', x.transf) : await sb.from('caixa').delete().eq('id', id);
   if (error) return erro(error);
-  toast('Lançamento excluído'); telaCaixa();
+  toast('Excluído'); telaCaixa();
+}
+function formTransf() {
+  if (bancos.filter((b) => b.ativo).length < 2) return toast('Cadastre pelo menos 2 contas/bancos em "Bancos e categorias"', 'erro');
+  const ativos = bancos.filter((b) => b.ativo);
+  openModal('⇄ Transferir entre contas', `
+    <div class="grid2">
+      <label>Sai de${bancoSel('tf_de', ativos[0].id)}</label>
+      <label>Entra em${bancoSel('tf_para', ativos[1].id)}</label>
+      <label>Valor (R$) *<input id="tf_val" inputmode="decimal" placeholder="0,00"></label>
+      <label>Data<input id="tf_data" type="date" value="${hojeISO()}"></label>
+      <label class="full">Observação<input id="tf_obs" placeholder="Ex.: depósito do dinheiro do caixa"></label>
+    </div>
+    <p class="hint">Transferência não conta como entrada nem saída da empresa, só move o dinheiro de uma conta para outra.</p>`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="tf_go" onclick="salvarTransf()">Transferir</button>`);
+}
+async function salvarTransf() {
+  const v = num($('#tf_val').value);
+  if (!(v > 0)) return toast('Informe o valor', 'erro');
+  if ($('#tf_de').value === $('#tf_para').value) return toast('Escolha contas diferentes', 'erro');
+  $('#tf_go').disabled = true;
+  const { error } = await sb.rpc('transferir', { p_de: +$('#tf_de').value, p_para: +$('#tf_para').value, p_valor: r2(v), p_data: $('#tf_data').value || hojeISO(), p_obs: $('#tf_obs').value });
+  if (error) { $('#tf_go').disabled = false; return erro(error); }
+  closeModal(); toast('Transferência feita ✔'); telaCaixa();
+}
+
+/* ---------- Bancos e categorias ---------- */
+async function telaCadastrosFin() {
+  const sb_ = await saldosBancos().catch((e) => { erro(e); return new Map(); });
+  const pad = bancoPadrao();
+  const catLinha = (c) => `<tr><td><span class="pn">${esc(c.nome)}</span> ${c.ativo ? '' : '<span class="tag">inativa</span>'}</td><td data-l="Tipo">${{ entrada: 'Entrada', saida: 'Saída', ambos: 'Entrada e saída' }[c.tipo]}</td>
+    <td class="num"><button class="btn btn-sm" onclick="formCategoria(${c.id})">Editar</button> <button class="btn btn-sm" onclick="ativarCategoria(${c.id},${!c.ativo})">${c.ativo ? 'Desativar' : 'Ativar'}</button> <button class="btn btn-sm btn-danger" onclick="excluirCategoria(${c.id})">Excluir</button></td></tr>`;
+  $('#fin_body').innerHTML = `
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:0">🏦 Bancos e contas</h3><button class="btn btn-primary" onclick="formBanco()">+ Novo banco / conta</button></div>
+      <table class="tbl" style="margin-top:10px"><thead><tr><th>Nome</th><th class="num">Saldo inicial</th><th class="num">Saldo atual</th><th></th></tr></thead><tbody>
+      ${bancos.map((b) => `<tr><td><span class="pn">${esc(b.nome)}</span> ${b.id === pad ? '<span class="tag blue">padrão</span>' : ''} ${b.ativo ? '' : '<span class="tag">inativa</span>'}</td>
+        <td class="num" data-l="Saldo inicial">${brl(b.saldo_inicial)}</td><td class="num" data-l="Saldo atual"><b>${brl(sb_.get(b.id) || 0)}</b></td>
+        <td class="num">${b.id !== pad && b.ativo ? `<button class="btn btn-sm" onclick="bancoPadraoDef(${b.id})">Tornar padrão</button> ` : ''}<button class="btn btn-sm" onclick="formBanco(${b.id})">Editar</button> <button class="btn btn-sm btn-danger" onclick="excluirBanco(${b.id})">Excluir</button></td></tr>`).join('')}
+      </tbody></table>
+      <p class="hint">A conta <b>padrão</b> já vem escolhida nos lançamentos e nas vendas. "Saldo inicial" é o dinheiro que já tinha na conta quando começou a usar o sistema.</p>
+    </div>
+    <div class="card">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3 style="margin:0">🏷️ Categorias</h3><button class="btn btn-primary" onclick="formCategoria()">+ Nova categoria</button></div>
+      <div class="grid2" style="margin-top:10px;align-items:start">
+        <div><h3>Entradas</h3><table class="tbl"><tbody>${catsFin.filter((c) => c.tipo !== 'saida').map(catLinha).join('') || '<tr><td class="muted">Nenhuma</td></tr>'}</tbody></table></div>
+        <div><h3>Saídas</h3><table class="tbl"><tbody>${catsFin.filter((c) => c.tipo !== 'entrada').map(catLinha).join('') || '<tr><td class="muted">Nenhuma</td></tr>'}</tbody></table></div>
+      </div>
+      <p class="hint">Renomear uma categoria também atualiza os lançamentos antigos. Desativar esconde da lista sem apagar o histórico.</p>
+    </div>`;
+}
+function formBanco(id) {
+  const b = id ? bancos.find((x) => x.id === id) : null;
+  openModal(b ? 'Editar banco / conta' : 'Novo banco / conta', `
+    <div class="grid2">
+      <label class="full">Nome *<input id="bk_nome" value="${esc(b?.nome || '')}" placeholder="Ex.: Banco do Brasil PJ, Nubank PJ, Caixa (dinheiro)"></label>
+      <label>Saldo inicial (R$)<input id="bk_ini" inputmode="decimal" value="${f2(b?.saldo_inicial || 0)}"></label>
+      ${b ? `<label class="chk" style="padding-top:22px"><input type="checkbox" id="bk_ativo" ${b.ativo ? 'checked' : ''}> Conta ativa</label>` : ''}
+    </div>`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="bk_go" onclick="salvarBanco(${id || 'null'})">Salvar</button>`);
+}
+async function salvarBanco(id) {
+  const nome = $('#bk_nome').value.trim();
+  if (!nome) return toast('Informe o nome', 'erro');
+  const body = { nome, saldo_inicial: r2(num($('#bk_ini').value)) };
+  if (id) body.ativo = $('#bk_ativo').checked; else body.ordem = (bancos.reduce((m, b) => Math.max(m, b.ordem), 0) || 0) + 1;
+  $('#bk_go').disabled = true;
+  const { error } = id ? await sb.from('bancos').update(body).eq('id', id) : await sb.from('bancos').insert(body);
+  if (error) { $('#bk_go').disabled = false; return erro(error); }
+  closeModal(); toast('Conta salva ✔'); await carregarBancos(); telaCadastrosFin();
+}
+async function bancoPadraoDef(id) {
+  const min = bancos.reduce((m, b) => Math.min(m, b.ordem), 0);
+  const { error } = await sb.from('bancos').update({ ordem: min - 1 }).eq('id', id);
+  if (error) return erro(error);
+  toast('Conta padrão alterada ✔'); await carregarBancos(); telaCadastrosFin();
+}
+async function excluirBanco(id) {
+  const { count } = await sb.from('caixa').select('id', { count: 'exact', head: true }).eq('banco_id', id);
+  if (count) return toast(`Esta conta tem ${count} lançamento(s) e não pode ser excluída. Use Editar → desmarque "Conta ativa".`, 'erro');
+  if (!confirm('Excluir esta conta?')) return;
+  const { error } = await sb.from('bancos').delete().eq('id', id);
+  if (error) return erro(error);
+  toast('Conta excluída'); await carregarBancos(); telaCadastrosFin();
+}
+function formCategoria(id) {
+  const c = id ? catsFin.find((x) => x.id === id) : null;
+  openModal(c ? 'Editar categoria' : 'Nova categoria', `
+    <div class="grid2">
+      <label>Nome *<input id="ct_nome" value="${esc(c?.nome || '')}"></label>
+      <label>Usada em<select id="ct_tipo">${[['entrada', 'Entradas'], ['saida', 'Saídas'], ['ambos', 'Entradas e saídas']].map(([v, t]) => `<option value="${v}" ${c?.tipo === v ? 'selected' : ''}>${t}</option>`).join('')}</select></label>
+    </div>`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="ct_go" onclick="salvarCategoria(${id || 'null'})">Salvar</button>`);
+}
+async function salvarCategoria(id) {
+  const nome = $('#ct_nome').value.trim(), tipo = $('#ct_tipo').value;
+  if (!nome) return toast('Informe o nome', 'erro');
+  if (catsFin.some((c) => c.id !== id && norm(c.nome) === norm(nome))) return toast('Já existe uma categoria com esse nome', 'erro');
+  $('#ct_go').disabled = true;
+  const { error } = id ? await sb.rpc('renomear_categoria', { p_id: id, p_nome: nome, p_tipo: tipo }) : await sb.from('categorias').insert({ nome, tipo });
+  if (error) { $('#ct_go').disabled = false; return erro(error); }
+  closeModal(); toast('Categoria salva ✔'); await carregarBancos(); telaCadastrosFin();
+}
+async function ativarCategoria(id, ativo) {
+  const { error } = await sb.from('categorias').update({ ativo }).eq('id', id);
+  if (error) return erro(error);
+  await carregarBancos(); telaCadastrosFin();
+}
+async function excluirCategoria(id) {
+  if (!confirm('Excluir esta categoria? Os lançamentos antigos continuam com o nome dela.')) return;
+  const { error } = await sb.from('categorias').delete().eq('id', id);
+  if (error) return erro(error);
+  toast('Categoria excluída'); await carregarBancos(); telaCadastrosFin();
 }
 
 /* ---------- Contas a pagar / receber ---------- */
@@ -1808,12 +1971,11 @@ async function listaContas(tipo, soFiltro) {
 }
 function formConta(tipo) {
   const R = tipo === 'receber';
-  const cats = R ? ['Serviço', 'Venda a prazo', 'Contrato mensal', 'Outros'] : CAT_SAI;
   openModal(`Nova conta a ${R ? 'receber' : 'pagar'}`, `
     <div class="grid2">
       <label class="full">Descrição *<input id="nc_desc" placeholder="${R ? 'Ex.: Manutenção de computadores' : 'Ex.: Aluguel da loja'}"></label>
       <label>${R ? 'Cliente' : 'Fornecedor / a quem pagar'}<input id="nc_pes" ${R ? 'list="dl_nccli"' : ''}>${R ? `<datalist id="dl_nccli">${clientes.map((c) => `<option value="${esc(c.nome)}">`).join('')}</datalist>` : ''}</label>
-      <label>Categoria<input id="nc_cat" list="dl_nccat"><datalist id="dl_nccat">${cats.map((c) => `<option value="${c}">`).join('')}</datalist></label>
+      <label>Categoria${catSel('nc_cat', R ? 'entrada' : 'saida', '')}</label>
       <label>Valor (R$) *<input id="nc_val" inputmode="decimal" placeholder="0,00" oninput="ncPrev()"></label>
       <label>${'1º vencimento'} *<input id="nc_venc" type="date" value="${maisDias(R ? 30 : 0)}" onchange="ncPrev()"></label>
       <label>Repetir / parcelar<select id="nc_n" onchange="ncPrev()">${Array.from({ length: 24 }, (_, k) => k + 1).map((n) => `<option value="${n}">${n === 1 ? 'Só uma vez' : n + ' vezes'}</option>`).join('')}</select></label>
@@ -1845,7 +2007,7 @@ async function salvarConta(tipo) {
   if (!(num($('#nc_val').value) > 0)) return toast('Informe o valor', 'erro');
   if (!$('#nc_venc').value) return toast('Informe o vencimento', 'erro');
   const pes = $('#nc_pes').value.trim(), cli = tipo === 'receber' ? clientes.find((c) => norm(c.nome) === norm(pes)) : null;
-  const rows = ncParcelas().map((p) => ({ tipo, descricao: d, pessoa: pes || null, cliente_id: cli?.id || null, categoria: $('#nc_cat').value.trim() || null, observacao: $('#nc_obs').value.trim() || null, ...p }));
+  const rows = ncParcelas().map((p) => ({ tipo, descricao: d, pessoa: pes || null, cliente_id: cli?.id || null, categoria: $('#nc_cat').value || null, observacao: $('#nc_obs').value.trim() || null, ...p }));
   $('#nc_go').disabled = true;
   const { error } = await sb.from('contas').insert(rows);
   if (error) { $('#nc_go').disabled = false; return erro(error); }
@@ -1860,14 +2022,15 @@ function formBaixa(id, tipo) {
       <label>Valor ${R ? 'recebido' : 'pago'} (R$)<input id="bx_val" inputmode="decimal" value="${f2(c.valor)}"></label>
       <label>Forma<select id="bx_forma">${FORMAS.map((f) => `<option>${f}</option>`).join('')}</select></label>
     </div>
-    <label class="chk" style="margin-top:12px"><input type="checkbox" id="bx_cx" checked> Lançar ${R ? 'entrada' : 'saída'} no fluxo de caixa</label>`,
+    <label class="chk" style="margin-top:12px"><input type="checkbox" id="bx_cx" checked onchange="$('#bx_bw').style.display=this.checked?'':'none'"> Lançar ${R ? 'entrada' : 'saída'} no fluxo de caixa</label>
+    <label id="bx_bw" style="margin-top:8px;max-width:320px">${R ? 'Entrou em' : 'Saiu de'} (conta / banco)${bancoSel('bx_banco')}</label>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-ok" id="bx_go" onclick="salvarBaixa(${id},'${tipo}')">Confirmar ${R ? 'recebimento' : 'pagamento'}</button>`);
 }
 async function salvarBaixa(id, tipo) {
   const v = num($('#bx_val').value);
   if (!(v > 0)) return toast('Informe o valor', 'erro');
   $('#bx_go').disabled = true;
-  const { error } = await sb.rpc('baixar_conta', { p_id: id, p_data: $('#bx_data').value || hojeISO(), p_valor: r2(v), p_forma: $('#bx_forma').value, p_caixa: $('#bx_cx').checked });
+  const { error } = await sb.rpc('baixar_conta', { p_id: id, p_data: $('#bx_data').value || hojeISO(), p_valor: r2(v), p_forma: $('#bx_forma').value, p_caixa: $('#bx_cx').checked, p_banco: +$('#bx_banco').value || null });
   if (error) { $('#bx_go').disabled = false; return erro(error); }
   closeModal(); toast(tipo === 'receber' ? 'Recebimento registrado ✔' : 'Pagamento registrado ✔'); listaContas(tipo);
 }
@@ -1879,12 +2042,11 @@ async function estornarConta(id, tipo) {
 }
 function editarConta(id, tipo) {
   const c = contasCache.find((x) => x.id === id), R = tipo === 'receber';
-  const cats = R ? ['Serviço', 'Venda a prazo', 'Contrato mensal', 'Outros'] : CAT_SAI;
   openModal(`Editar conta a ${R ? 'receber' : 'pagar'}${c.parcela ? ' (' + esc(c.parcela) + ')' : ''}`, `
     <div class="grid2">
       <label class="full">Descrição *<input id="ec_desc" value="${esc(c.descricao)}"></label>
       <label>${R ? 'Cliente' : 'Fornecedor / a quem pagar'}<input id="ec_pes" value="${esc(c.pessoa || '')}" ${R ? 'list="dl_eccli"' : ''}>${R ? `<datalist id="dl_eccli">${clientes.map((x) => `<option value="${esc(x.nome)}">`).join('')}</datalist>` : ''}</label>
-      <label>Categoria<input id="ec_cat" list="dl_eccat" value="${esc(c.categoria || '')}"><datalist id="dl_eccat">${cats.map((x) => `<option value="${x}">`).join('')}</datalist></label>
+      <label>Categoria${catSel('ec_cat', R ? 'entrada' : 'saida', c.categoria)}</label>
       <label>Valor (R$) *<input id="ec_val" inputmode="decimal" value="${f2(c.valor)}"></label>
       <label>Vencimento *<input id="ec_venc" type="date" value="${c.vencimento}"></label>
       <label class="full">Observação<input id="ec_obs" value="${esc(c.observacao || '')}"></label>
@@ -1900,7 +2062,7 @@ async function salvarEdicaoConta(id, tipo) {
   const pes = $('#ec_pes').value.trim(), cli = tipo === 'receber' ? clientes.find((c) => norm(c.nome) === norm(pes)) : null;
   const old = contasCache.find((x) => x.id === id);
   $('#ec_go').disabled = true;
-  const { error } = await sb.from('contas').update({ descricao: d, pessoa: pes || null, cliente_id: cli?.id || (old.venda_id ? old.cliente_id : null), categoria: $('#ec_cat').value.trim() || null, valor: r2(v), vencimento: $('#ec_venc').value, observacao: $('#ec_obs').value.trim() || null }).eq('id', id);
+  const { error } = await sb.from('contas').update({ descricao: d, pessoa: pes || null, cliente_id: cli?.id || (old.venda_id ? old.cliente_id : null), categoria: $('#ec_cat').value || null, valor: r2(v), vencimento: $('#ec_venc').value, observacao: $('#ec_obs').value.trim() || null }).eq('id', id);
   if (error) { $('#ec_go').disabled = false; return erro(error); }
   closeModal(); toast('Conta alterada ✔'); listaContas(tipo);
 }
@@ -1909,6 +2071,224 @@ async function excluirConta(id, tipo) {
   const { error } = await sb.from('contas').delete().eq('id', id);
   if (error) return erro(error);
   toast('Conta excluída'); listaContas(tipo);
+}
+
+/* ====================== RELATÓRIOS ====================== */
+let relTipo = 'vendas';
+let relFil = { ini: '', fim: '', cliente: '', categoria: '', banco: '', catfin: '', situacao: '', contaTipo: 'ambos' };
+let relAtual = null;
+const pctFmt = (n) => (isFinite(n) ? pct(n) : '—');
+function relPeriodo(q) {
+  const h = inicioDia(hojeISO()), iso = (d) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  if (q === 'mes') { relFil.ini = iso(new Date(h.getFullYear(), h.getMonth(), 1)); relFil.fim = hojeISO(); }
+  if (q === 'mesant') { relFil.ini = iso(new Date(h.getFullYear(), h.getMonth() - 1, 1)); relFil.fim = iso(new Date(h.getFullYear(), h.getMonth(), 0)); }
+  if (q === '30') { relFil.ini = iso(new Date(+h - 29 * 864e5)); relFil.fim = hojeISO(); }
+  if (q === 'ano') { relFil.ini = `${h.getFullYear()}-01-01`; relFil.fim = hojeISO(); }
+  telaRelatorios();
+}
+async function telaRelatorios() {
+  if (!relFil.ini) { relPeriodo('mes'); return; }
+  if (!bancos.length) { try { await carregarBancos(); } catch (e) { } }
+  const T = [['vendas', '🛒 Vendas'], ['estoque', '📦 Estoque'], ['caixa', '💵 Fluxo de caixa'], ['contas', '📑 Contas a pagar/receber']];
+  const cats = catsFinProd();
+  const filtros = {
+    vendas: `<select onchange="relFil.cliente=this.value;gerarRel()"><option value="">Todos os clientes</option><option value="0" ${relFil.cliente === '0' ? 'selected' : ''}>Consumidor (sem cadastro)</option>${clientes.map((c) => `<option value="${c.id}" ${relFil.cliente == c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select>
+             <select onchange="relFil.categoria=this.value;gerarRel()"><option value="">Todas as categorias de produto</option>${cats.map((c) => `<option ${relFil.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`,
+    estoque: `<select onchange="relFil.categoria=this.value;gerarRel()"><option value="">Todas as categorias</option>${cats.map((c) => `<option ${relFil.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+              <select onchange="relFil.situacao=this.value;gerarRel()">${[['', 'Todos os produtos'], ['baixo', 'Só estoque baixo / zerado'], ['com', 'Só com estoque']].map(([v, t]) => `<option value="${v}" ${relFil.situacao === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`,
+    caixa: `<select onchange="relFil.banco=this.value;gerarRel()"><option value="">Todas as contas / bancos</option>${bancos.map((b) => `<option value="${b.id}" ${relFil.banco == b.id ? 'selected' : ''}>${esc(b.nome)}</option>`).join('')}</select>
+            <select onchange="relFil.catfin=this.value;gerarRel()"><option value="">Todas as categorias</option>${[...new Set(catsFin.map((c) => c.nome))].map((c) => `<option ${relFil.catfin === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`,
+    contas: `<select onchange="relFil.contaTipo=this.value;gerarRel()">${[['ambos', 'A pagar e a receber'], ['pagar', 'Só a pagar'], ['receber', 'Só a receber']].map(([v, t]) => `<option value="${v}" ${relFil.contaTipo === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`,
+  };
+  $('#main').innerHTML = `
+    <div class="pagehead"><h1>Relatórios</h1><div class="actions"><button class="btn" onclick="imprimirRel()">🖨 Imprimir / PDF</button><button class="btn" onclick="csvRel()">⬇ Planilha</button></div></div>
+    <div class="seg" style="max-width:860px;overflow-x:auto">${T.map(([v, t]) => `<button class="${relTipo === v ? 'on' : ''}" onclick="relTipo='${v}';telaRelatorios()">${t}</button>`).join('')}</div>
+    <div class="card filtros">
+      <label style="flex-direction:row;align-items:center;gap:6px">De <input type="date" value="${relFil.ini}" style="width:auto" onchange="relFil.ini=this.value;gerarRel()"></label>
+      <label style="flex-direction:row;align-items:center;gap:6px">até <input type="date" value="${relFil.fim}" style="width:auto" onchange="relFil.fim=this.value;gerarRel()"></label>
+      <div class="actions">${[['mes', 'Este mês'], ['mesant', 'Mês passado'], ['30', '30 dias'], ['ano', 'Este ano']].map(([q, t]) => `<button class="btn btn-sm" onclick="relPeriodo('${q}')">${t}</button>`).join('')}</div>
+      ${filtros[relTipo]}
+    </div>
+    <div id="rel_body"><p class="muted">Gerando…</p></div>`;
+  gerarRel();
+}
+function catsFinProd() { return [...new Set(produtos.map((p) => p.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b)); }
+const isoMais1 = (iso) => { const d = inicioDia(iso); d.setDate(d.getDate() + 1); return d.toISOString(); };
+function agrupa(lista, chave, campos) {
+  const m = new Map();
+  lista.forEach((x) => { const k = chave(x); const o = m.get(k) || Object.fromEntries(campos.map((c) => [c, 0])); campos.forEach((c) => o[c] += x[c] || 0); m.set(k, o); });
+  return [...m.entries()];
+}
+async function gerarRel() {
+  const el = $('#rel_body'); if (!el) return;
+  el.innerHTML = '<p class="muted">Gerando…</p>';
+  try {
+    relAtual = await ({ vendas: relVendas, estoque: relEstoque, caixa: relCaixa, contas: relContas })[relTipo]();
+    el.innerHTML = renderRel(relAtual);
+  } catch (e) { erro(e); el.innerHTML = '<p class="muted">Não foi possível gerar o relatório.</p>'; }
+}
+function renderRel(r) {
+  return `${r.resumo?.length ? `<div class="kpis">${r.resumo.map(([l, v, cor]) => `<div class="kpi"><small>${esc(l)}</small><b style="${cor ? 'color:' + cor : ''}">${v}</b></div>`).join('')}</div>` : ''}
+    ${r.secoes.map((s) => `<div class="card"><h3 style="margin-top:0">${esc(s.titulo)}</h3>${s.linhas.length ? `<table class="tbl"><thead><tr>${s.cab.map((c, i) => `<th class="${s.num?.includes(i) ? 'num' : ''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>
+      ${s.linhas.map((l) => `<tr>${l.map((v, i) => `<td class="${s.num?.includes(i) ? 'num' : ''}" data-l="${esc(s.cab[i])}">${i === 0 ? `<span class="pn">${esc(v)}</span>` : esc(v)}</td>`).join('')}</tr>`).join('')}
+      ${s.total ? `<tr>${s.total.map((v, i) => `<td class="${s.num?.includes(i) ? 'num' : ''}" data-l="${esc(s.cab[i])}"><b>${esc(v)}</b></td>`).join('')}</tr>` : ''}
+      </tbody></table>` : '<p class="muted">Nada neste período.</p>'}</div>`).join('')}`;
+}
+
+async function relVendas() {
+  const { ini, fim } = relFil;
+  const vs = await fetchAll(() => sb.from('vendas').select('id,data,cliente_id,cliente_nome,forma_pagamento,vendedor,total,tipo,status,venda_itens(produto_id,produto_nome,quantidade,preco_unit,venda_custos(custo_unit))')
+    .eq('status', 'concluida').gte('data', inicioDia(ini).toISOString()).lt('data', isoMais1(fim)).order('data'));
+  const catDe = new Map(produtos.map((p) => [p.id, p.categoria || '']));
+  const filtroCli = (v) => !relFil.cliente || (relFil.cliente === '0' ? !v.cliente_id : v.cliente_id == relFil.cliente);
+  const itens = [];
+  vs.filter(filtroCli).forEach((v) => v.venda_itens.forEach((i) => {
+    if (relFil.categoria && catDe.get(i.produto_id) !== relFil.categoria) return;
+    const cu = Number((Array.isArray(i.venda_custos) ? i.venda_custos[0] : i.venda_custos)?.custo_unit || 0);
+    itens.push({ v, nome: i.produto_nome, qtd: i.quantidade, fat: i.quantidade * Number(i.preco_unit), cus: i.quantidade * cu });
+  }));
+  const vend = itens.filter((x) => x.v.tipo === 'venda'), sai = itens.filter((x) => x.v.tipo === 'saida');
+  const fat = vend.reduce((s, x) => s + x.fat, 0), cus = vend.reduce((s, x) => s + x.cus, 0), cSai = sai.reduce((s, x) => s + x.cus, 0);
+  const nV = new Set(vend.map((x) => x.v.id)).size;
+  const linha = ([k, o]) => [k, o.qtd, brl(o.fat), brl(o.cus), brl(o.fat - o.cus), pctFmt(margemPor(o.cus, o.fat))];
+  const ord = (a) => a.sort((x, y) => y[1].fat - x[1].fat);
+  const cab = (n) => [n, 'Qtd itens', 'Faturamento', 'Custo', 'Lucro', 'Margem'];
+  const N = [1, 2, 3, 4, 5];
+  return {
+    titulo: 'Relatório de vendas',
+    resumo: [['Vendas', nV], ['Faturamento', brl(fat)], ['Custo das mercadorias', brl(cus)], ['Lucro das vendas', brl(fat - cus), 'var(--ok)'], ['Margem sobre o custo', pctFmt(margemPor(cus, fat))],
+      ['Ticket médio', brl(nV ? fat / nV : 0)], ['Itens vendidos', vend.reduce((s, x) => s + x.qtd, 0)], ['Custo das saídas sem venda', brl(cSai), 'var(--bad)'], ['Lucro real', brl(fat - cus - cSai), fat - cus - cSai < 0 ? 'var(--bad)' : 'var(--ok)']],
+    secoes: [
+      { titulo: 'Por produto', cab: cab('Produto'), num: N, linhas: ord(agrupa(vend, (x) => x.nome, ['qtd', 'fat', 'cus'])).map(linha) },
+      { titulo: 'Por cliente', cab: cab('Cliente'), num: N, linhas: ord(agrupa(vend, (x) => x.v.cliente_nome, ['qtd', 'fat', 'cus'])).map(linha) },
+      { titulo: 'Por dia', cab: cab('Dia'), num: N, linhas: agrupa(vend, (x) => dataBR(x.v.data), ['qtd', 'fat', 'cus']).map(linha) },
+      { titulo: 'Por forma de pagamento', cab: cab('Forma'), num: N, linhas: ord(agrupa(vend, (x) => x.v.forma_pagamento || '—', ['qtd', 'fat', 'cus'])).map(linha) },
+      { titulo: 'Por vendedor', cab: cab('Vendedor'), num: N, linhas: ord(agrupa(vend, (x) => x.v.vendedor || '—', ['qtd', 'fat', 'cus'])).map(linha) },
+      { titulo: 'Saídas sem venda', cab: ['Produto', 'Qtd', 'Custo (despesa)'], num: [1, 2], linhas: agrupa(sai, (x) => x.nome, ['qtd', 'cus']).map(([k, o]) => [k, o.qtd, brl(o.cus)]) },
+      { titulo: 'Lista de vendas', cab: ['Venda', 'Data', 'Cliente', 'Pagamento', 'Total'], num: [4],
+        linhas: [...new Map(vend.map((x) => [x.v.id, x.v])).values()].map((v) => ['#' + v.id, dataHoraBR(v.data), v.cliente_nome, v.forma_pagamento || '', brl(v.total)]) },
+    ],
+  };
+}
+
+async function relEstoque() {
+  const { ini, fim } = relFil;
+  const [ents, its, ajs] = await Promise.all([
+    fetchAll(() => sb.from('entradas').select('produto_id,quantidade,custo_unit').gte('data', ini).lte('data', fim)),
+    fetchAll(() => sb.from('venda_itens').select('produto_id,quantidade,vendas!inner(data,status,tipo)').eq('vendas.status', 'concluida').gte('vendas.data', inicioDia(ini).toISOString()).lt('vendas.data', isoMais1(fim))),
+    fetchAll(() => sb.from('ajustes').select('produto_id,quantidade_anterior,quantidade_nova').gte('criado_em', inicioDia(ini).toISOString()).lt('criado_em', isoMais1(fim))),
+  ]);
+  let ps = produtos.filter((p) => p.ativo && (!relFil.categoria || p.categoria === relFil.categoria));
+  if (relFil.situacao === 'baixo') ps = ps.filter((p) => p.estoque <= 0 || (p.estoque_minimo > 0 && p.estoque <= p.estoque_minimo));
+  if (relFil.situacao === 'com') ps = ps.filter((p) => p.estoque > 0);
+  const ids = new Set(ps.map((p) => p.id));
+  const mov = new Map(ps.map((p) => [p.id, { ent: 0, vend: 0, sai: 0, aj: 0 }]));
+  ents.forEach((e) => ids.has(e.produto_id) && (mov.get(e.produto_id).ent += e.quantidade));
+  its.forEach((i) => ids.has(i.produto_id) && (mov.get(i.produto_id)[i.vendas.tipo === 'saida' ? 'sai' : 'vend'] += i.quantidade));
+  ajs.forEach((a) => ids.has(a.produto_id) && (mov.get(a.produto_id).aj += a.quantidade_nova - a.quantidade_anterior));
+  const cu = (p) => Number(p.c?.custo_final || 0);
+  const tq = ps.reduce((s, p) => s + Math.max(0, p.estoque), 0), tc = ps.reduce((s, p) => s + Math.max(0, p.estoque) * cu(p), 0);
+  const ta = ps.reduce((s, p) => s + Math.max(0, p.estoque) * Number(p.preco_atacado), 0), tv = ps.reduce((s, p) => s + Math.max(0, p.estoque) * Number(p.preco_varejo), 0);
+  const parados = ps.filter((p) => p.estoque > 0 && !mov.get(p.id).vend);
+  return {
+    titulo: 'Relatório de estoque',
+    resumo: [['Produtos', ps.length], ['Unidades em estoque', tq], ['Estoque a preço de custo', brl(tc)], ['Estoque a preço de atacado', brl(ta)], ['Estoque a preço de varejo', brl(tv)], ['Lucro potencial (varejo)', brl(tv - tc), 'var(--ok)'],
+      ['Estoque baixo / zerado', ps.filter((p) => p.estoque <= 0 || (p.estoque_minimo > 0 && p.estoque <= p.estoque_minimo)).length, 'var(--warn)']],
+    secoes: [
+      { titulo: 'Posição atual do estoque', cab: ['Produto', 'Categoria', 'Qtd', 'Custo un.', 'Custo total', 'Atacado', 'Varejo', 'Varejo total'], num: [2, 3, 4, 5, 6, 7],
+        linhas: ps.map((p) => [p.nome, p.categoria || '', p.estoque, brl(cu(p)), brl(Math.max(0, p.estoque) * cu(p)), brl(p.preco_atacado), brl(p.preco_varejo), brl(Math.max(0, p.estoque) * p.preco_varejo)]),
+        total: ['TOTAL', '', tq, '', brl(tc), '', '', brl(tv)] },
+      { titulo: 'Movimentação no período', cab: ['Produto', 'Entradas (compras)', 'Vendidos', 'Saídas sem venda', 'Ajustes', 'Estoque hoje'], num: [1, 2, 3, 4, 5],
+        linhas: ps.filter((p) => { const m = mov.get(p.id); return m.ent || m.vend || m.sai || m.aj; }).map((p) => { const m = mov.get(p.id); return [p.nome, m.ent, m.vend, m.sai, (m.aj > 0 ? '+' : '') + m.aj, p.estoque]; }) },
+      { titulo: 'Produtos parados (com estoque e sem venda no período)', cab: ['Produto', 'Qtd', 'Custo parado'], num: [1, 2],
+        linhas: parados.sort((a, b) => b.estoque * cu(b) - a.estoque * cu(a)).map((p) => [p.nome, p.estoque, brl(p.estoque * cu(p))]),
+        total: parados.length ? ['TOTAL', parados.reduce((s, p) => s + p.estoque, 0), brl(parados.reduce((s, p) => s + p.estoque * cu(p), 0))] : null },
+    ],
+  };
+}
+
+async function relCaixa() {
+  const { ini, fim } = relFil, bf = relFil.banco ? +relFil.banco : null;
+  const todos = await fetchAll(() => sb.from('caixa').select('*').lte('data', fim).order('data').order('id'));
+  const doBanco = (x) => !bf || x.banco_id === bf;
+  const per = todos.filter((x) => x.data >= ini && doBanco(x) && (!relFil.catfin || x.categoria === relFil.catfin));
+  const real = per.filter((x) => x.categoria !== 'Transferência' || bf);
+  const ent = real.filter((x) => x.tipo === 'entrada').reduce((s, x) => s + Number(x.valor), 0);
+  const sai = real.filter((x) => x.tipo === 'saida').reduce((s, x) => s + Number(x.valor), 0);
+  const bl = bancos.filter((b) => !bf || b.id === bf);
+  const porBanco = bl.map((b) => {
+    const ant = Number(b.saldo_inicial || 0) + todos.filter((x) => x.banco_id === b.id && x.data < ini).reduce((s, x) => s + sinal(x), 0);
+    const p = todos.filter((x) => x.banco_id === b.id && x.data >= ini);
+    const e = p.filter((x) => x.tipo === 'entrada').reduce((s, x) => s + Number(x.valor), 0), sa = p.filter((x) => x.tipo === 'saida').reduce((s, x) => s + Number(x.valor), 0);
+    return [b.nome, brl(ant), brl(e), brl(sa), brl(ant + e - sa), ant + e - sa];
+  });
+  const cats = (t) => agrupa(real.filter((x) => x.tipo === t), (x) => x.categoria || '(sem categoria)', ['valor']).map(([k, o]) => [k, o.valor]).sort((a, b) => b[1] - a[1]);
+  const ce = cats('entrada'), cs = cats('saida');
+  const meses = agrupa(real.map((x) => ({ ...x, e: x.tipo === 'entrada' ? Number(x.valor) : 0, s: x.tipo === 'saida' ? Number(x.valor) : 0 })), (x) => x.data.slice(0, 7), ['e', 's']);
+  return {
+    titulo: 'Relatório de fluxo de caixa' + (bf ? ' — ' + nomeBanco(bf) : ''),
+    resumo: [['Entradas', brl(ent), 'var(--ok)'], ['Saídas', brl(sai), 'var(--bad)'], ['Resultado', brl(ent - sai), ent - sai < 0 ? 'var(--bad)' : 'var(--ok)'], ['Saldo final (contas)', brl(porBanco.reduce((s, l) => s + l[5], 0))]],
+    secoes: [
+      { titulo: 'Por conta / banco', cab: ['Conta', 'Saldo no início', 'Entradas', 'Saídas', 'Saldo no fim'], num: [1, 2, 3, 4], linhas: porBanco.map((l) => l.slice(0, 5)),
+        total: porBanco.length > 1 ? ['TOTAL', brl(porBanco.reduce((s, l) => s + num(l[1]), 0)), '', '', brl(porBanco.reduce((s, l) => s + l[5], 0))] : null },
+      { titulo: 'Entradas por categoria', cab: ['Categoria', 'Valor', '% das entradas'], num: [1, 2], linhas: ce.map(([k, v]) => [k, brl(v), pctFmt(ent ? v / ent * 100 : 0)]), total: ce.length ? ['TOTAL', brl(ent), ''] : null },
+      { titulo: 'Saídas por categoria', cab: ['Categoria', 'Valor', '% das saídas'], num: [1, 2], linhas: cs.map(([k, v]) => [k, brl(v), pctFmt(sai ? v / sai * 100 : 0)]), total: cs.length ? ['TOTAL', brl(sai), ''] : null },
+      { titulo: 'Por mês', cab: ['Mês', 'Entradas', 'Saídas', 'Resultado'], num: [1, 2, 3], linhas: meses.map(([k, o]) => [k.split('-').reverse().join('/'), brl(o.e), brl(o.s), brl(o.e - o.s)]) },
+      { titulo: 'Lançamentos', cab: ['Data', 'Descrição', 'Categoria', 'Conta', 'Forma', 'Valor'], num: [5],
+        linhas: per.slice().reverse().map((x) => [dataBR(x.data), x.descricao, x.categoria || '', nomeBanco(x.banco_id), x.forma || '', (x.tipo === 'entrada' ? '+ ' : '− ') + brl(x.valor)]) },
+    ],
+  };
+}
+
+async function relContas() {
+  const { ini, fim } = relFil, t = relFil.contaTipo;
+  let q = () => { let x = sb.from('contas').select('*').order('vencimento'); if (t !== 'ambos') x = x.eq('tipo', t); return x; };
+  const all = await fetchAll(q);
+  const ab = all.filter((c) => !c.pago_em), venc = ab.filter((c) => diasAte(c.vencimento) < 0);
+  const noPer = ab.filter((c) => c.vencimento >= ini && c.vencimento <= fim);
+  const pagas = all.filter((c) => c.pago_em && c.pago_em >= ini && c.pago_em <= fim);
+  const sm = (a, f = 'valor') => a.reduce((s, c) => s + Number(c[f] || 0), 0);
+  const tp = (c) => (c.tipo === 'pagar' ? 'A pagar' : 'A receber');
+  const lin = (c) => [c.descricao + (c.parcela ? ` (${c.parcela})` : ''), tp(c), c.pessoa || '', dataBR(c.vencimento), brl(c.valor), c.pago_em ? 'Paga ' + dataBR(c.pago_em) : (diasAte(c.vencimento) < 0 ? `Vencida há ${-diasAte(c.vencimento)} dias` : 'Em aberto')];
+  const cab = ['Descrição', 'Tipo', 'Fornecedor / cliente', 'Vencimento', 'Valor', 'Situação'];
+  const res = [];
+  if (t !== 'receber') res.push(['A pagar em aberto', brl(sm(ab.filter((c) => c.tipo === 'pagar'))), 'var(--bad)']);
+  if (t !== 'pagar') res.push(['A receber em aberto', brl(sm(ab.filter((c) => c.tipo === 'receber'))), 'var(--ok)']);
+  res.push(['Vencidas', brl(sm(venc)), venc.length ? 'var(--bad)' : ''], ['Vencem no período', brl(sm(noPer))]);
+  if (t !== 'receber') res.push(['Pago no período', brl(sm(pagas.filter((c) => c.tipo === 'pagar'), 'valor_pago'))]);
+  if (t !== 'pagar') res.push(['Recebido no período', brl(sm(pagas.filter((c) => c.tipo === 'receber'), 'valor_pago'))]);
+  return {
+    titulo: 'Relatório de contas a pagar e a receber',
+    resumo: res,
+    secoes: [
+      { titulo: 'Vencidas (todas, até hoje)', cab, num: [4], linhas: venc.map(lin), total: venc.length ? ['TOTAL', '', '', '', brl(sm(venc)), ''] : null },
+      { titulo: 'Vencem no período escolhido', cab, num: [4], linhas: noPer.map(lin), total: noPer.length ? ['TOTAL', '', '', '', brl(sm(noPer)), ''] : null },
+      { titulo: 'Pagas / recebidas no período', cab: ['Descrição', 'Tipo', 'Fornecedor / cliente', 'Data', 'Valor pago', 'Forma'], num: [4],
+        linhas: pagas.map((c) => [c.descricao + (c.parcela ? ` (${c.parcela})` : ''), tp(c), c.pessoa || '', dataBR(c.pago_em), brl(c.valor_pago), c.forma || '']) },
+      { titulo: 'Em aberto por fornecedor / cliente', cab: ['Fornecedor / cliente', 'Tipo', 'Contas', 'Total em aberto'], num: [2, 3],
+        linhas: agrupa(ab.map((c) => ({ ...c, n: 1, v: Number(c.valor) })), (c) => (c.pessoa || '(sem nome)') + '|' + tp(c), ['n', 'v']).sort((a, b) => b[1].v - a[1].v).map(([k, o]) => [k.split('|')[0], k.split('|')[1], o.n, brl(o.v)]) },
+    ],
+  };
+}
+
+function imprimirRel() {
+  const r = relAtual; if (!r) return;
+  $('#print-area').innerHTML = `<div style="font-family:Arial,sans-serif;font-size:11px">
+    <div style="display:flex;justify-content:space-between;align-items:center;border-bottom:2px solid #333;padding-bottom:8px;margin-bottom:10px">
+      <img src="${LOGO}" style="height:50px"><div style="text-align:right"><b style="font-size:16px">${esc(r.titulo)}</b><br>Período: ${dataBR(relFil.ini)} a ${dataBR(relFil.fim)}<br><small>Gerado em ${dataHoraBR(new Date().toISOString())}</small></div></div>
+    ${r.resumo?.length ? `<table style="margin-bottom:12px"><tr>${r.resumo.map(([l, v]) => `<td style="border:1px solid #bbb;padding:5px"><small>${esc(l)}</small><br><b>${v}</b></td>`).join('')}</tr></table>` : ''}
+    ${r.secoes.filter((s) => s.linhas.length).map((s) => `<h3 style="margin:14px 0 4px;font-size:13px">${esc(s.titulo)}</h3><table><thead><tr>${s.cab.map((c, i) => `<th style="${s.num?.includes(i) ? 'text-align:right' : ''}">${esc(c)}</th>`).join('')}</tr></thead><tbody>
+      ${[...s.linhas, ...(s.total ? [s.total] : [])].map((l, j) => `<tr style="${s.total && j === s.linhas.length ? 'font-weight:bold' : ''}">${l.map((v, i) => `<td style="${s.num?.includes(i) ? 'text-align:right' : ''}">${esc(v)}</td>`).join('')}</tr>`).join('')}</tbody></table>`).join('')}
+  </div>`;
+  window.print();
+}
+function csvRel() {
+  const r = relAtual; if (!r) return;
+  const q = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const out = [[r.titulo], [`Período: ${dataBR(relFil.ini)} a ${dataBR(relFil.fim)}`], []];
+  (r.resumo || []).forEach(([l, v]) => out.push([l, v]));
+  r.secoes.forEach((s) => { out.push([], [s.titulo], s.cab); s.linhas.forEach((l) => out.push(l)); if (s.total) out.push(s.total); });
+  baixar(`relatorio-${relTipo}-${relFil.ini}-a-${relFil.fim}.csv`, '﻿' + out.map((l) => l.map(q).join(';')).join('\r\n'), 'text/csv;charset=utf-8');
 }
 
 /* ====================== CONFIGURAÇÕES ====================== */
@@ -1960,7 +2340,7 @@ async function mudarPapel(id, papel) {
 }
 async function backupJSON() {
   try {
-    const t = ['config', 'recibos', 'caixa', 'contas', 'produtos', 'produto_custos', 'notas', 'codigos_fornecedor', 'entradas', 'ajustes', 'clientes', 'precos_cliente', 'vendas', 'venda_itens', 'venda_custos'];
+    const t = ['config', 'recibos', 'bancos', 'categorias', 'caixa', 'contas', 'produtos', 'produto_custos', 'notas', 'codigos_fornecedor', 'entradas', 'ajustes', 'clientes', 'precos_cliente', 'vendas', 'venda_itens', 'venda_custos'];
     const out = { gerado_em: new Date().toISOString() };
     for (const n of t) out[n] = await fetchAll(() => sb.from(n).select('*'));
     baixar(`backup-estoque-beto-${hojeISO()}.json`, JSON.stringify(out, null, 1), 'application/json');
