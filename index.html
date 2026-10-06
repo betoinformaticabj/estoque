@@ -1843,14 +1843,38 @@ async function vendaFinanceiro(v) {
   } else if (cx.data?.length) {
     el.innerHTML = `<div class="alert ok" style="margin-top:10px;display:block">✔ Lançada no fluxo de caixa em ${dataBR(cx.data[0].data)}:${cx.data.map((x) => `<br>• ${brl(x.valor)}${x.forma ? ' · ' + esc(x.forma) : ''} → <b>${esc(nomeBanco(x.banco_id))}</b>`).join('')}</div>`;
   } else {
-    el.innerHTML = `<div class="alert info" style="margin-top:10px">Esta venda <b>não está</b> no fluxo de caixa. Lançar em ${bancoSel('vv_banco')} <button class="chipbtn" onclick="vendaParaCaixa(${v.id})">💰 Lançar no caixa agora</button></div>`;
-    $('#vv_banco').style.width = 'auto';
+    const fm = FORMAS.includes(v.forma_pagamento) ? v.forma_pagamento : 'Pix';
+    el.innerHTML = `<div class="card" style="margin-top:12px;border-left:4px solid var(--blue)">
+      <b>Esta venda ainda não está no fluxo de caixa nem no Contas a receber.</b>
+      <div style="margin-top:10px"><b>💰 Cliente já pagou?</b> Lance no caixa na data em que o dinheiro entrou:</div>
+      <div class="grid2" style="margin-top:6px">
+        <label>Recebido em<input type="date" id="vv_data" value="${hojeISO()}"></label>
+        <label>Forma<select id="vv_forma">${FORMAS.map((f) => `<option ${f === fm ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+        <label>Entrou em (conta / banco)${bancoSel('vv_banco', bancoParaForma(fm))}</label>
+        <label style="justify-content:flex-end"><button class="btn btn-ok" id="vv_go" onclick="vendaParaCaixa(${v.id})">💰 Lançar no caixa</button></label>
+      </div>
+      <div style="margin-top:14px"><b>📑 Cliente ainda vai pagar?</b> Mande para o Contas a receber:</div>
+      <div class="grid2" style="margin-top:6px">
+        <label>Vai pagar em<input type="date" id="vv_venc" value="${maisDias(3)}"></label>
+        <label style="justify-content:flex-end"><button class="btn" id="vv_rec" onclick="vendaParaReceber(${v.id})">📑 Mandar para Contas a receber</button></label>
+      </div></div>`;
+    $('#vv_forma').onchange = (e) => { $('#vv_banco').value = bancoParaForma(e.target.value); };
   }
 }
 async function vendaParaCaixa(id) {
-  const { error } = await sb.rpc('venda_para_caixa', { p_id: id, p_forma: null, p_banco: +$('#vv_banco').value || null });
-  if (error) return erro(error);
-  toast('Venda lançada no caixa ✔'); verVenda(id);
+  const d = $('#vv_data').value || hojeISO();
+  $('#vv_go').disabled = true;
+  const { error } = await sb.rpc('venda_para_caixa', { p_id: id, p_forma: $('#vv_forma').value, p_banco: +$('#vv_banco').value || null, p_data: d });
+  if (error) { $('#vv_go').disabled = false; return erro(error); }
+  toast(`Venda lançada no caixa em ${dataBR(d)} ✔`); verVenda(id); if (aba === 'vendas') listaVendas();
+}
+async function vendaParaReceber(id) {
+  const d = $('#vv_venc').value;
+  if (!d) return toast('Informe a data em que o cliente vai pagar', 'erro');
+  $('#vv_rec').disabled = true;
+  const { error } = await sb.rpc('venda_para_receber', { p_id: id, p_vencimento: d });
+  if (error) { $('#vv_rec').disabled = false; return erro(error); }
+  toast('Enviada para Contas a receber ✔'); verVenda(id); if (aba === 'vendas') listaVendas();
 }
 
 function statusConta(c) {
