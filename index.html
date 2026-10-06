@@ -1011,7 +1011,7 @@ async function excluirEntrada(id) {
 }
 
 /* ====================== VENDER ====================== */
-const vendaNova = (tipo = 'venda') => ({ cliente: null, itens: [], precosCli: {}, forma: 'Pix', obs: '', tipo, destino: '', cond: 'avista', caixa: null, parcelas: 1, venc: '' });
+const vendaNova = (tipo = 'venda') => ({ cliente: null, itens: [], precosCli: {}, forma: 'Pix', obs: '', tipo, destino: '', cond: 'avista', caixa: null, parcelas: 1, venc: '', pags: null, banco: null });
 const maisDias = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 let venda = vendaNova();
 const ehSaida = () => venda.tipo === 'saida';
@@ -1081,11 +1081,52 @@ function renderPagVenda() {
       <div class="hint" id="vd_parc"></div>
       <p class="hint">Vai para <b>Contas a receber</b>. Quando o cliente pagar, você dá baixa lá e entra no caixa.</p>`
     : `
-      <label>Forma de pagamento<select id="vd_forma" onchange="venda.forma=this.value">${FORMAS.map((f) => `<option ${venda.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+      ${venda.pags ? `
+        <label>Formas de pagamento</label>
+        ${venda.pags.map((pg, i) => `<div style="border:1px solid var(--line);border-radius:9px;padding:8px;margin-top:6px">
+          <div style="display:grid;grid-template-columns:1fr 110px 30px;gap:6px;align-items:center">
+            <select onchange="venda.pags[${i}].forma=this.value;venda.pags[${i}].banco=bancoParaForma(this.value);renderPagVenda()">${FORMAS.map((f) => `<option ${pg.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select>
+            <input id="vd_pv${i}" inputmode="decimal" placeholder="0,00" value="${pg.valor ? f2(pg.valor) : ''}" oninput="pagValor(${i},this.value)">
+            <button class="xbtn" style="height:34px" title="Remover" onclick="venda.pags.splice(${i},1);if(venda.pags.length<2){venda.forma=venda.pags[0]?.forma||venda.forma;venda.banco=venda.pags[0]?.banco;venda.pags=null}renderPagVenda()">×</button>
+          </div>
+          ${venda.caixa === true && bancos.length ? `<div style="margin-top:6px;font-size:13px">Entrou em ${bancoSel('vd_pb' + i, pg.banco, `onchange="venda.pags[${i}].banco=+this.value"`)}</div>` : ''}
+        </div>`).join('')}
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:6px;flex-wrap:wrap">
+          <button class="link" onclick="venda.pags.push({forma:'Pix',banco:bancoParaForma('Pix'),valor:0});renderPagVenda()">+ outra forma</button>
+          <span id="vd_pagst" style="font-size:13px"></span>
+        </div>`
+      : `<label>Forma de pagamento<select id="vd_forma" onchange="venda.forma=this.value;venda.banco=bancoParaForma(this.value);renderPagVenda()">${FORMAS.map((f) => `<option ${venda.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+        <button class="link" style="font-size:13px;margin-top:4px" onclick="dividirPag()">➗ Dividir pagamento (ex.: dinheiro + Pix)</button>`}
       <label style="margin-top:10px">Lançar esta venda no fluxo de caixa?</label>
       <div class="seg" style="margin:4px 0 0"><button class="${venda.caixa === true ? 'on' : ''}" onclick="venda.caixa=true;renderPagVenda()">✔ Sim</button><button class="${venda.caixa === false ? 'on' : ''}" onclick="venda.caixa=false;renderPagVenda()">Não</button></div>
-      ${venda.caixa === true && bancos.length ? `<label style="margin-top:10px">Entrou em (conta / banco)${bancoSel('vd_banco', venda.banco ?? null, 'onchange="venda.banco=+this.value"')}</label>` : ''}`}`;
-  totalVenda();
+      ${venda.caixa === true && bancos.length && !venda.pags ? `<label style="margin-top:10px">Entrou em (conta / banco)${bancoSel('vd_banco', venda.banco ?? bancoParaForma(venda.forma), 'onchange="venda.banco=+this.value"')}</label>` : ''}`}`;
+  totalVenda(); pagStatus();
+}
+function bancoParaForma(f) {
+  if (f === 'Dinheiro') { const b = bancos.find((x) => x.ativo && /dinheiro|caixa/i.test(x.nome)); if (b) return b.id; }
+  return bancoPadrao();
+}
+const totalItens = () => r2(venda.itens.reduce((s, i) => s + i.qtd * i.preco, 0));
+function pagValor(i, v) {
+  venda.pags[i].valor = num(v);
+  if (venda.pags.length === 2) { // com 2 formas, a outra completa o total sozinha
+    const o = 1 - i, resto = r2(totalItens() - venda.pags[i].valor);
+    venda.pags[o].valor = resto > 0 ? resto : 0;
+    const inp = $('#vd_pv' + o); if (inp) inp.value = venda.pags[o].valor ? f2(venda.pags[o].valor) : '';
+  }
+  pagStatus();
+}
+function dividirPag() {
+  const t = totalItens();
+  venda.pags = [{ forma: 'Dinheiro', banco: bancoParaForma('Dinheiro'), valor: 0 }, { forma: 'Pix', banco: bancoParaForma('Pix'), valor: 0 }];
+  if (venda.forma && venda.forma !== 'Dinheiro') venda.pags[1].forma = venda.forma;
+  venda.pags[1].valor = t;
+  renderPagVenda();
+}
+function pagStatus() {
+  const el = $('#vd_pagst'); if (!el || !venda.pags) return;
+  const t = totalItens(), sm = r2(venda.pags.reduce((s, p) => s + (p.valor || 0), 0)), d = r2(t - sm);
+  el.innerHTML = Math.abs(d) < 0.01 ? `<span style="color:var(--ok);font-weight:700">✔ Soma confere (${brl(sm)})</span>` : d > 0 ? `<span style="color:var(--warn);font-weight:700">Falta ${brl(d)}</span>` : `<span style="color:var(--bad);font-weight:700">Passou ${brl(-d)}</span>`;
 }
 function renderCliVenda() {
   const c = venda.cliente;
@@ -1206,6 +1247,7 @@ function totalVenda() {
   }
   if ($('#vd_total')) $('#vd_total').textContent = brl(t);
   if ($('#vd_qtd')) $('#vd_qtd').textContent = venda.itens.length ? `${venda.itens.length} produto(s) · ${q} unidade(s)` : '';
+  pagStatus();
   if ($('#vd_parc')) { const n = venda.parcelas || 1, pv = Math.floor(r2(t) / n * 100) / 100; $('#vd_parc').innerHTML = t ? `${n}x de <b>${brl(pv)}</b>${n > 1 && r2(t - pv * n) ? ` (última ${brl(r2(t) - pv * (n - 1))})` : ''} · 1ª em ${dataBR(venda.venc)}` : ''; }
   if (isAdmin && $('#vd_lucro')) {
     const cu = venda.itens.reduce((s, i) => s + i.qtd * (prod(i.pid).c?.custo_final || 0), 0);
@@ -1223,15 +1265,22 @@ async function finalizarVenda() {
   if (!sd && venda.cond === 'prazo' && !venda.cliente) return toast('Venda a prazo: escolha o cliente (quem vai pagar)', 'erro');
   if (!sd && venda.cond === 'prazo' && !venda.venc) return toast('Informe o 1º vencimento', 'erro');
   if (!sd && venda.cond === 'avista' && venda.caixa === null) return toast('Responda: lançar esta venda no fluxo de caixa? (Sim ou Não)', 'erro');
+  const dividido = !sd && venda.cond === 'avista' && venda.pags && venda.pags.length > 1;
+  if (dividido) {
+    if (venda.pags.some((p) => !(p.valor > 0))) return toast('Preencha o valor de cada forma de pagamento', 'erro');
+    const d = r2(totalItens() - venda.pags.reduce((s, p) => s + p.valor, 0));
+    if (Math.abs(d) >= 0.01) return toast(d > 0 ? `A soma dos pagamentos está faltando ${brl(d)}` : `A soma dos pagamentos passou ${brl(-d)} do total`, 'erro');
+  }
   if (!sd && isAdmin && venda.itens.some((i) => prod(i.pid).c && i.preco <= prod(i.pid).c.custo_final) && !confirm('Tem produto sendo vendido abaixo do custo. Finalizar mesmo assim?')) return;
   const b = $('#vd_go'); b.disabled = true;
   const { data, error } = await sb.rpc('registrar_venda', {
     p_cliente_id: venda.cliente?.id || null,
     p_itens: venda.itens.map((i) => ({ produto_id: i.pid, quantidade: i.qtd, preco_unit: sd ? 0 : r2(i.preco), salvar_preco: !sd && !!i.salvar })),
-    p_forma: sd ? null : venda.forma, p_obs: venda.obs, p_tipo: venda.tipo, p_destino: sd ? venda.destino : null,
+    p_forma: sd ? null : (dividido ? venda.pags.map((p) => `${p.forma} ${brl(p.valor)}`).join(' + ') : venda.forma), p_obs: venda.obs, p_tipo: venda.tipo, p_destino: sd ? venda.destino : null,
     p_condicao: venda.cond, p_caixa: !sd && venda.cond === 'avista' && venda.caixa === true,
     p_parcelas: venda.parcelas || 1, p_vencimento: venda.cond === 'prazo' ? venda.venc : null,
-    p_banco: (!sd && venda.cond === 'avista' && venda.caixa === true) ? (+$('#vd_banco')?.value || bancoPadrao()) : null,
+    p_banco: (!sd && venda.cond === 'avista' && venda.caixa === true && !dividido) ? (+$('#vd_banco')?.value || bancoPadrao()) : null,
+    p_pagamentos: (dividido && venda.caixa === true) ? venda.pags.map((p) => ({ forma: p.forma, banco_id: p.banco || bancoPadrao(), valor: r2(p.valor) })) : null,
   });
   if (error) { b.disabled = false; return erro(error); }
   venda = vendaNova(venda.tipo);
@@ -1681,7 +1730,7 @@ async function vendaFinanceiro(v) {
   if (ct.data?.length) {
     el.innerHTML = `<h3>Contas a receber desta venda</h3><table class="tbl"><tbody>${ct.data.map((c) => `<tr><td>${c.parcela ? esc(c.parcela) : 'Parcela única'}</td><td data-l="Vencimento">${dataBR(c.vencimento)}</td><td class="num" data-l="Valor">${brl(c.valor)}</td><td class="num">${statusConta(c)}</td></tr>`).join('')}</tbody></table>`;
   } else if (cx.data?.length) {
-    el.innerHTML = `<div class="alert ok" style="margin-top:10px">✔ Lançada no fluxo de caixa em ${dataBR(cx.data[0].data)} · <b>${esc(nomeBanco(cx.data[0].banco_id))}</b>${cx.data[0].forma ? ' · ' + esc(cx.data[0].forma) : ''}.</div>`;
+    el.innerHTML = `<div class="alert ok" style="margin-top:10px;display:block">✔ Lançada no fluxo de caixa em ${dataBR(cx.data[0].data)}:${cx.data.map((x) => `<br>• ${brl(x.valor)}${x.forma ? ' · ' + esc(x.forma) : ''} → <b>${esc(nomeBanco(x.banco_id))}</b>`).join('')}</div>`;
   } else {
     el.innerHTML = `<div class="alert info" style="margin-top:10px">Esta venda <b>não está</b> no fluxo de caixa. Lançar em ${bancoSel('vv_banco')} <button class="chipbtn" onclick="vendaParaCaixa(${v.id})">💰 Lançar no caixa agora</button></div>`;
     $('#vv_banco').style.width = 'auto';
