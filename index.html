@@ -336,6 +336,16 @@ function buscaProdutos(t, max = 20) {
     }));
 }
 
+function buscaServicos(t, max = 10) {
+  const ws = norm(t).split(/\s+/).filter(Boolean);
+  if (!ws.length) return [];
+  return servicos.filter((x) => x.ativo && ws.every((w) => norm(`${x.nome} ${x.categoria || ''} serviço servico`).includes(w)))
+    .slice(0, max).map((x) => ({
+      v: { ...x, __svc: true }, l: `<b>🔧 ${esc(x.nome)}</b><br><small>${esc(x.categoria || 'Serviço')}</small>`,
+      r: `<span class="tag blue">SERVIÇO</span><br><small>${brl(x.preco)}</small>`
+    }));
+}
+
 /* ====================== início / login ====================== */
 async function init() {
   const url = SUPABASE_URL || lsGet('sb_url'), key = SUPABASE_KEY || lsGet('sb_key');
@@ -423,7 +433,13 @@ async function carregarBase() {
   produtos = ps.map((p) => ({ ...p, c: mc.get(p.id) || null }));
   clientes = cls;
   try { await carregarBancos(); } catch (e) { bancos = []; catsFin = []; }
+  await carregarServicos();
 }
+let servicos = [];
+async function carregarServicos() {
+  try { servicos = await fetchAll(() => sb.from('servicos').select('*').order('nome')); } catch (e) { servicos = []; }
+}
+const serv = (id) => servicos.find((x) => x.id === id);
 async function recarregarProdutos() {
   const [ps, cs] = await Promise.all([
     fetchAll(() => sb.from('produtos').select('*').order('nome')),
@@ -438,6 +454,7 @@ const ABAS = [
   { id: 'painel', nome: 'Painel', ic: '📊' },
   { id: 'vender', nome: 'Vender', ic: '🛒' },
   { id: 'produtos', nome: 'Produtos', ic: '📦' },
+  { id: 'servicos', nome: 'Serviços', ic: '🔧' },
   { id: 'entrada', nome: 'Entrada', ic: '📥', admin: true },
   { id: 'clientes', nome: 'Clientes', ic: '👥' },
   { id: 'vendas', nome: 'Vendas', ic: '📈' },
@@ -461,7 +478,7 @@ function ir(id) {
   aba = id;
   document.querySelectorAll('.tabs button').forEach((b) => b.classList.toggle('on', b.dataset.aba === id));
   const m = $('#main'); m.innerHTML = '';
-  ({ painel: telaPainel, vender: telaVender, produtos: telaProdutos, entrada: telaEntrada, clientes: telaClientes, vendas: telaVendas, recibos: telaRecibos, financeiro: telaFinanceiro, relatorios: telaRelatorios, config: telaConfig })[id]();
+  ({ painel: telaPainel, vender: telaVender, produtos: telaProdutos, servicos: telaServicos, entrada: telaEntrada, clientes: telaClientes, vendas: telaVendas, recibos: telaRecibos, financeiro: telaFinanceiro, relatorios: telaRelatorios, config: telaConfig })[id]();
   window.scrollTo(0, 0);
 }
 
@@ -1024,6 +1041,7 @@ function sugerido(p) {
 function mudarTipo(t) {
   if (venda.tipo === t) return;
   venda.tipo = t;
+  if (t === 'saida' && venda.itens.some((i) => i.svc)) { venda.itens = venda.itens.filter((i) => !i.svc); toast('Serviços removidos: saída sem venda é só para produtos'); }
   telaVender();
 }
 function telaVender() {
@@ -1041,7 +1059,7 @@ function telaVender() {
           <label>${sd ? 'Cliente (opcional)' : 'Cliente'}</label>
           <div id="vd_cli" style="margin-top:4px"></div>
         </div>
-        <div class="card">${picker('vd_busca', '🔎 Buscar produto (nome, código, marca)…')}</div>
+        <div class="card">${sd ? picker('vd_busca', '🔎 Buscar produto (nome, código, marca)…') : `<div style="display:flex;gap:8px;align-items:center"><div style="flex:1">${picker('vd_busca', '🔎 Buscar produto ou serviço…')}</div><button class="btn" id="vd_avulso" onclick="addServicoVenda(null)" title="Serviço que não está cadastrado">🔧 Serviço avulso</button></div>`}</div>
         <div id="vd_itens"></div>
       </div>
       <div class="card resumo">
@@ -1062,7 +1080,7 @@ function telaVender() {
       </div>
     </div>`;
   renderCliVenda();
-  bindPicker('vd_busca', (t) => buscaProdutos(t), (p) => { addItemVenda(p); $('#vd_busca').value = ''; });
+  bindPicker('vd_busca', (t) => sd ? buscaProdutos(t) : [...buscaServicos(t, 8), ...buscaProdutos(t)], (p) => { if (p.__svc) addServicoVenda(p); else addItemVenda(p); $('#vd_busca').value = ''; });
   renderPagVenda();
   renderItensVenda();
 }
@@ -1147,14 +1165,14 @@ async function trocarCliente(c) {
     const { data, error } = await sb.from('precos_cliente').select('*').eq('cliente_id', c.id);
     if (error) erro(error); else data.forEach((x) => venda.precosCli[x.produto_id] = x);
   }
-  for (const it of venda.itens) { const p = prod(it.pid); it.preco = sugerido(p); it.hist = []; it.salvar = false; }
+  for (const it of venda.itens) { if (it.svc) continue; const p = prod(it.pid); it.preco = sugerido(p); it.hist = []; it.salvar = false; }
   renderCliVenda();
   if (!ehSaida()) await Promise.all(venda.itens.map(carregarHist));
   renderItensVenda();
   if (c && venda.itens.length && !ehSaida()) toast('Preços atualizados para ' + c.nome);
 }
 async function carregarHist(it) {
-  if (!venda.cliente || ehSaida()) { it.hist = []; return; }
+  if (it.svc || !venda.cliente || ehSaida()) { it.hist = []; return; }
   const { data, error } = await sb.rpc('historico_cliente_produto', { p_cliente_id: venda.cliente.id, p_produto_id: it.pid });
   it.hist = error ? [] : data;
 }
@@ -1166,11 +1184,36 @@ async function addItemVenda(p) {
   await carregarHist(it);
   renderItensVenda();
 }
+function addServicoVenda(sv) {
+  if (sv) {
+    const ex = venda.itens.find((i) => i.svc && i.sid === sv.id);
+    if (ex) { ex.qtd++; renderItensVenda(); return; }
+    venda.itens.push({ svc: true, sid: sv.id, desc: sv.nome, qtd: 1, preco: Number(sv.preco) || 0 });
+    renderItensVenda();
+  } else {
+    venda.itens.push({ svc: true, sid: null, desc: '', qtd: 1, preco: 0 });
+    renderItensVenda();
+    setTimeout(() => $('#vsv_' + (venda.itens.length - 1))?.focus(), 30);
+  }
+}
 function renderItensVenda() {
   const box = $('#vd_itens'); if (!box) return;
   const sd = ehSaida();
-  box.innerHTML = !venda.itens.length ? `<div class="card"><p class="muted" style="margin:0">Busque um produto acima para adicionar ${sd ? 'à saída' : 'à venda'}.</p></div>`
-    : venda.itens.map((it, i) => { const p = prod(it.pid); return sd ? `
+  box.innerHTML = !venda.itens.length ? `<div class="card"><p class="muted" style="margin:0">${sd ? 'Busque um produto acima para adicionar à saída.' : 'Busque um produto ou serviço acima para adicionar à venda — ou use <b>🔧 Serviço avulso</b> para um serviço que não está cadastrado.'}</p></div>`
+    : venda.itens.map((it, i) => { if (it.svc) return `
+      <div class="item svc">
+        <div class="item-top">
+          <div class="nm"><span class="tag blue" style="font-size:11px">🔧 SERVIÇO${it.sid ? '' : ' AVULSO'}</span>
+            <input id="vsv_${i}" style="margin-top:4px" value="${esc(it.desc)}" placeholder="Descreva o serviço feito…" oninput="venda.itens[${i}].desc=this.value">
+            ${it.sid && serv(it.sid)?.categoria ? `<div class="muted" style="font-weight:400;font-size:12px">${esc(serv(it.sid).categoria)}</div>` : ''}</div>
+          <label>Qtd<input type="number" min="1" value="${it.qtd}" oninput="venda.itens[${i}].qtd=parseInt(this.value)||0;atualizaLinha(${i})"></label>
+          <label>Valor (R$)<input id="vp_${i}" inputmode="decimal" value="${it.preco ? f2(it.preco) : ''}" placeholder="0,00" oninput="venda.itens[${i}].preco=num(this.value);atualizaLinha(${i})"></label>
+          <label>Subtotal<input id="vs_${i}" disabled></label>
+          <button class="xbtn" title="Remover" onclick="venda.itens.splice(${i},1);renderItensVenda()">×</button>
+        </div>
+        <div id="vi_${i}"></div>
+      </div>`;
+      const p = prod(it.pid); return sd ? `
       <div class="item">
         <div class="item-top" style="grid-template-columns:1fr 110px 34px">
           <div class="nm">${esc(p.nome)}<div class="muted" style="font-weight:400;font-size:12px">Em estoque: ${p.estoque} ${esc(p.unidade)} → <b id="vsd_${i}"></b></div></div>
@@ -1199,7 +1242,9 @@ function renderItensVenda() {
 }
 function setPreco(i, v) { venda.itens[i].preco = v; $('#vp_' + i).value = f2(v); atualizaLinha(i); }
 function atualizaLinha(i) {
-  const it = venda.itens[i], p = prod(it.pid), el = $('#vi_' + i); if (!el) return;
+  const it = venda.itens[i], el = $('#vi_' + i); if (!el) return;
+  if (it.svc) { $('#vs_' + i).value = brl(it.qtd * it.preco); el.innerHTML = ''; totalVenda(); return; }
+  const p = prod(it.pid);
   const out = [];
   if (it.qtd > p.estoque) out.push(`<div class="alert bad">Estoque insuficiente: só há ${p.estoque} ${esc(p.unidade)}.</div>`);
   if (ehSaida()) {
@@ -1235,7 +1280,8 @@ function verHist(i) {
     <table class="tbl"><thead><tr><th>Data</th><th class="num">Qtd</th><th class="num">Preço</th></tr></thead><tbody>${it.hist.map((h) => `<tr><td>${dataHoraBR(h.data)}</td><td class="num" data-l="Qtd">${h.quantidade}</td><td class="num" data-l="Preço">${brl(h.preco_unit)}</td></tr>`).join('')}</tbody></table>`, `<button class="btn" onclick="closeModal()">Fechar</button>`);
 }
 function totalVenda() {
-  const t = venda.itens.reduce((s, i) => s + i.qtd * i.preco, 0), q = venda.itens.reduce((s, i) => s + i.qtd, 0);
+  const t = venda.itens.reduce((s, i) => s + i.qtd * i.preco, 0), q = venda.itens.filter((i) => !i.svc).reduce((s, i) => s + i.qtd, 0);
+  const nP = venda.itens.filter((i) => !i.svc).length, nS = venda.itens.filter((i) => i.svc).length;
   if (ehSaida()) {
     if ($('#vd_total')) $('#vd_total').textContent = `${q} un`;
     if ($('#vd_qtd')) $('#vd_qtd').textContent = venda.itens.length ? `${venda.itens.length} produto(s)` : '';
@@ -1246,20 +1292,24 @@ function totalVenda() {
     return;
   }
   if ($('#vd_total')) $('#vd_total').textContent = brl(t);
-  if ($('#vd_qtd')) $('#vd_qtd').textContent = venda.itens.length ? `${venda.itens.length} produto(s) · ${q} unidade(s)` : '';
+  if ($('#vd_qtd')) $('#vd_qtd').textContent = venda.itens.length ? [nP ? `${nP} produto(s) · ${q} unidade(s)` : '', nS ? `${nS} serviço(s)` : ''].filter(Boolean).join(' · ') : '';
   pagStatus();
   if ($('#vd_parc')) { const n = venda.parcelas || 1, pv = Math.floor(r2(t) / n * 100) / 100; $('#vd_parc').innerHTML = t ? `${n}x de <b>${brl(pv)}</b>${n > 1 && r2(t - pv * n) ? ` (última ${brl(r2(t) - pv * (n - 1))})` : ''} · 1ª em ${dataBR(venda.venc)}` : ''; }
   if (isAdmin && $('#vd_lucro')) {
-    const cu = venda.itens.reduce((s, i) => s + i.qtd * (prod(i.pid).c?.custo_final || 0), 0);
+    const cu = venda.itens.reduce((s, i) => s + (i.svc ? 0 : i.qtd * (prod(i.pid).c?.custo_final || 0)), 0);
     const l = t - cu;
     $('#vd_lucro').innerHTML = venda.itens.length ? `<div class="custo-line ${l <= 0 ? 'bad' : margemPor(cu, t) < cfg.margem_minima_pct ? 'warn' : 'good'}">Lucro estimado: <b>${brl(l)}</b> (${pct(margemPor(cu, t))})</div>` : '';
   }
 }
 async function finalizarVenda() {
   const sd = ehSaida();
-  if (!venda.itens.length) return toast('Adicione pelo menos um produto', 'erro');
+  if (!venda.itens.length) return toast(sd ? 'Adicione pelo menos um produto' : 'Adicione pelo menos um produto ou serviço', 'erro');
   if (venda.itens.some((i) => !i.qtd || i.qtd <= 0)) return toast('Confira as quantidades', 'erro');
-  const falta = venda.itens.find((i) => i.qtd > prod(i.pid).estoque);
+  const semDesc = venda.itens.findIndex((i) => i.svc && !String(i.desc || '').trim());
+  if (semDesc >= 0) { toast('Descreva o serviço', 'erro'); $('#vsv_' + semDesc)?.focus(); return; }
+  const semVal = venda.itens.find((i) => i.svc && !(i.preco > 0));
+  if (semVal && !confirm(`O serviço "${semVal.desc}" está sem valor (R$ 0,00). Finalizar mesmo assim?`)) return;
+  const falta = venda.itens.find((i) => !i.svc && i.qtd > prod(i.pid).estoque);
   if (falta) return toast(`Estoque insuficiente: ${prod(falta.pid).nome}`, 'erro');
   if (sd && !venda.destino.trim() && !venda.cliente) { toast('Informe para onde foi / quem recebeu', 'erro'); $('#vd_dest')?.focus(); return; }
   if (!sd && venda.cond === 'prazo' && !venda.cliente) return toast('Venda a prazo: escolha o cliente (quem vai pagar)', 'erro');
@@ -1271,11 +1321,12 @@ async function finalizarVenda() {
     const d = r2(totalItens() - venda.pags.reduce((s, p) => s + p.valor, 0));
     if (Math.abs(d) >= 0.01) return toast(d > 0 ? `A soma dos pagamentos está faltando ${brl(d)}` : `A soma dos pagamentos passou ${brl(-d)} do total`, 'erro');
   }
-  if (!sd && isAdmin && venda.itens.some((i) => prod(i.pid).c && i.preco <= prod(i.pid).c.custo_final) && !confirm('Tem produto sendo vendido abaixo do custo. Finalizar mesmo assim?')) return;
+  if (!sd && isAdmin && venda.itens.some((i) => !i.svc && prod(i.pid).c && i.preco <= prod(i.pid).c.custo_final) && !confirm('Tem produto sendo vendido abaixo do custo. Finalizar mesmo assim?')) return;
   const b = $('#vd_go'); b.disabled = true;
   const { data, error } = await sb.rpc('registrar_venda', {
     p_cliente_id: venda.cliente?.id || null,
-    p_itens: venda.itens.map((i) => ({ produto_id: i.pid, quantidade: i.qtd, preco_unit: sd ? 0 : r2(i.preco), salvar_preco: !sd && !!i.salvar })),
+    p_itens: venda.itens.map((i) => i.svc ? { tipo: 'servico', servico_id: i.sid, descricao: i.desc.trim(), quantidade: i.qtd, preco_unit: r2(i.preco) }
+      : { produto_id: i.pid, quantidade: i.qtd, preco_unit: sd ? 0 : r2(i.preco), salvar_preco: !sd && !!i.salvar }),
     p_forma: sd ? null : (dividido ? venda.pags.map((p) => `${p.forma} ${brl(p.valor)}`).join(' + ') : venda.forma), p_obs: venda.obs, p_tipo: venda.tipo, p_destino: sd ? venda.destino : null,
     p_condicao: venda.cond, p_caixa: !sd && venda.cond === 'avista' && venda.caixa === true,
     p_parcelas: venda.parcelas || 1, p_vencimento: venda.cond === 'prazo' ? venda.venc : null,
@@ -1366,15 +1417,15 @@ async function verVenda(id, recemFeita) {
         ${v.venda_itens.map((i) => `<tr><td class="pn">${esc(i.produto_nome)}</td><td class="num" data-l="Qtd"><b>${i.quantidade}</b></td>${isAdmin ? `<td class="num" data-l="Custo un.">${brl(custos[i.id] || 0)}</td><td class="num" data-l="Custo total">${brl((custos[i.id] || 0) * i.quantidade)}</td>` : ''}</tr>`).join('')}
         </tbody></table>${isAdmin ? `<div style="text-align:right;margin-top:10px;font-size:18px">Custo (despesa): <b style="color:var(--bad)">${brl(tc)}</b></div>` : ''}
         <p class="hint">Saída sem venda: não gera faturamento, mas o custo do produto entra como despesa no lucro real do mês.</p>`
-      : `<table class="tbl"><thead><tr><th>Produto</th><th class="num">Qtd</th><th class="num">Preço</th>${isAdmin ? '<th class="num">Custo</th><th class="num">Lucro</th>' : ''}<th class="num">Subtotal</th></tr></thead><tbody>
-      ${v.venda_itens.map((i) => { const cu = custos[i.id] || 0; return `<tr><td class="pn">${esc(i.produto_nome)}</td><td class="num" data-l="Qtd">${i.quantidade}</td><td class="num" data-l="Preço">${brl(i.preco_unit)}</td>
+      : `<table class="tbl"><thead><tr><th>Produto / serviço</th><th class="num">Qtd</th><th class="num">Preço</th>${isAdmin ? '<th class="num">Custo</th><th class="num">Lucro</th>' : ''}<th class="num">Subtotal</th></tr></thead><tbody>
+      ${v.venda_itens.map((i) => { const cu = custos[i.id] || 0; return `<tr><td class="pn">${i.tipo === 'servico' ? '<span class="tag blue" style="font-size:11px">SERVIÇO</span> ' : ''}${esc(i.produto_nome)}</td><td class="num" data-l="Qtd">${i.quantidade}</td><td class="num" data-l="Preço">${brl(i.preco_unit)}</td>
         ${isAdmin ? `<td class="num" data-l="Custo">${brl(cu)}</td><td class="num" data-l="Lucro">${brl((i.preco_unit - cu) * i.quantidade)}</td>` : ''}<td class="num" data-l="Subtotal"><b>${brl(i.quantidade * i.preco_unit)}</b></td></tr>`; }).join('')}
       </tbody></table>
       <div style="text-align:right;margin-top:10px;font-size:20px">Total: <b>${brl(v.total)}</b></div>
       ${isAdmin ? `<div style="text-align:right" class="muted">Custo ${brl(tc)} · Lucro <b style="color:var(--ok)">${brl(v.total - tc)}</b></div>` : ''}`}
       ${v.observacao ? `<p class="hint">Obs.: ${esc(v.observacao)}</p>` : ''}
       <div id="vv_fin"></div>
-    `, `${isAdmin && v.status === 'concluida' ? `<button class="btn btn-danger" style="margin-right:auto" onclick="cancelarVenda(${v.id})">Cancelar ${sd ? 'saída' : 'venda'}</button>` : ''}${isAdmin && !sd && v.status === 'concluida' ? `<button class="btn" onclick="converterSaida(${v.id})">📤 Transformar em saída sem venda</button>` : ''}<button class="btn" onclick="closeModal()">Fechar</button><button class="btn btn-primary" onclick='imprimirRecibo(${v.id})'>🖨 Imprimir comprovante</button>`, true);
+    `, `${isAdmin && v.status === 'concluida' ? `<button class="btn btn-danger" style="margin-right:auto" onclick="cancelarVenda(${v.id})">Cancelar ${sd ? 'saída' : 'venda'}</button>` : ''}${isAdmin && !sd && v.status === 'concluida' && !v.venda_itens.some((i) => i.tipo === 'servico') ? `<button class="btn" onclick="converterSaida(${v.id})">📤 Transformar em saída sem venda</button>` : ''}<button class="btn" onclick="closeModal()">Fechar</button><button class="btn btn-primary" onclick='imprimirRecibo(${v.id})'>🖨 Imprimir comprovante</button>`, true);
     window._vendaAtual = v;
     if (isAdmin && !sd && v.status === 'concluida') vendaFinanceiro(v);
   } catch (e) { erro(e); }
@@ -1385,8 +1436,8 @@ function imprimirRecibo() {
   $('#print-area').innerHTML = `<div style="max-width:720px;margin:auto;font-family:Arial,sans-serif">
     <h2 style="margin:0">${esc(cfg.empresa)}</h2><div>${sd ? 'Comprovante de entrega / saída' : 'Comprovante de venda'} nº ${v.id} — <i>sem valor fiscal</i></div>
     <p>Data: ${dataHoraBR(v.data)}<br>${sd ? `Entregue para: <b>${esc(v.destino || v.cliente_nome)}</b>${v.cliente_id && v.destino ? `<br>Cliente: ${esc(v.cliente_nome)}` : ''}` : `Cliente: <b>${esc(v.cliente_nome)}</b><br>Pagamento: ${esc(v.forma_pagamento || '—')}`}</p>
-    <table><thead><tr><th>Produto</th><th>Qtd</th>${sd ? '' : '<th>Preço</th><th>Subtotal</th>'}</tr></thead><tbody>
-    ${v.venda_itens.map((i) => `<tr><td>${esc(i.produto_nome)}</td><td>${i.quantidade}</td>${sd ? '' : `<td>${brl(i.preco_unit)}</td><td>${brl(i.quantidade * i.preco_unit)}</td>`}</tr>`).join('')}
+    <table><thead><tr><th>${sd ? 'Produto' : 'Produto / serviço'}</th><th>Qtd</th>${sd ? '' : '<th>Preço</th><th>Subtotal</th>'}</tr></thead><tbody>
+    ${v.venda_itens.map((i) => `<tr><td>${i.tipo === 'servico' ? 'Serviço: ' : ''}${esc(i.produto_nome)}</td><td>${i.quantidade}</td>${sd ? '' : `<td>${brl(i.preco_unit)}</td><td>${brl(i.quantidade * i.preco_unit)}</td>`}</tr>`).join('')}
     </tbody></table>${sd ? '' : `<h3 style="text-align:right">Total: ${brl(v.total)}</h3>`}
     ${v.observacao ? `<p>Obs.: ${esc(v.observacao)}</p>` : ''}
     <p style="margin-top:50px">_______________________________________<br>${sd ? 'Assinatura de quem recebeu' : 'Assinatura do cliente'}</p></div>`;
@@ -1410,6 +1461,66 @@ async function cancelarVenda(id) {
   const { error } = await sb.rpc('cancelar_venda', { p_id: id });
   if (error) return erro(error);
   await recarregarProdutos(); closeModal(); toast('Cancelado e estoque devolvido'); ir(aba);
+}
+
+/* ====================== SERVIÇOS ====================== */
+let svFil = { b: '', cat: '' };
+async function telaServicos() {
+  await carregarServicos();
+  const cats = [...new Set(servicos.map((x) => x.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  $('#main').innerHTML = `
+    <div class="pagehead"><h1>Serviços</h1><div class="actions">${isAdmin ? `<button class="btn btn-primary" onclick="formServico()">+ Novo serviço</button>` : ''}</div></div>
+    <div class="alert info" style="margin:-6px 0 14px">Cadastre aqui os serviços que você faz sempre (formatação, limpeza, instalação…). Na hora de <b>Vender</b>, é só buscar pelo nome — e o que for diferente você lança como <b>🔧 Serviço avulso</b>, descrevendo na hora.</div>
+    <div class="card filtros"><input id="sv_b" placeholder="🔎 Buscar serviço…" value="${esc(svFil.b)}" oninput="svFil.b=this.value;listaServicos()">
+      <select onchange="svFil.cat=this.value;listaServicos()"><option value="">Todas as categorias</option>${cats.map((c) => `<option ${svFil.cat === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select></div>
+    <div class="card" id="sv_l"></div>`;
+  listaServicos();
+}
+async function listaServicos() {
+  const ws = norm(svFil.b).split(/\s+/).filter(Boolean);
+  const l = servicos.filter((x) => (!svFil.cat || x.categoria === svFil.cat) && ws.every((w) => norm(`${x.nome} ${x.categoria || ''} ${x.descricao || ''}`).includes(w)));
+  let feitos = new Map();
+  if (isAdmin && servicos.length) {
+    try {
+      const h = inicioDia(hojeISO()), ini = new Date(h.getFullYear(), h.getMonth(), 1);
+      const its = await fetchAll(() => sb.from('venda_itens').select('servico_id,quantidade,preco_unit,vendas!inner(data,status)').eq('tipo', 'servico').not('servico_id', 'is', null).eq('vendas.status', 'concluida').gte('vendas.data', ini.toISOString()));
+      its.forEach((i) => { const o = feitos.get(i.servico_id) || { q: 0, v: 0 }; o.q += i.quantidade; o.v += i.quantidade * Number(i.preco_unit); feitos.set(i.servico_id, o); });
+    } catch (e) { }
+  }
+  $('#sv_l').innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Serviço</th><th>Categoria</th><th class="num">Preço padrão</th>${isAdmin ? '<th class="num">Feitos no mês</th><th></th>' : ''}</tr></thead><tbody>${l.map((x) => `
+    <tr><td class="pn">${esc(x.nome)} ${x.ativo ? '' : '<span class="tag">inativo</span>'}${x.descricao ? `<div class="sub">${esc(x.descricao)}</div>` : ''}</td><td data-l="Categoria">${esc(x.categoria || '—')}</td><td class="num" data-l="Preço padrão">${brl(x.preco)}</td>
+    ${isAdmin ? `<td class="num" data-l="Feitos no mês">${feitos.get(x.id) ? `${feitos.get(x.id).q} · ${brl(feitos.get(x.id).v)}` : '<span class="muted">—</span>'}</td><td class="num"><button class="btn btn-sm" onclick="formServico(${x.id})">Editar</button></td>` : ''}</tr>`).join('')}</tbody></table>`
+    : `<p class="muted">${servicos.length ? 'Nenhum serviço encontrado.' : 'Nenhum serviço cadastrado ainda.'}</p>`;
+}
+function formServico(id) {
+  const x = id ? serv(id) : null;
+  const cats = [...new Set(servicos.map((s) => s.categoria).filter(Boolean))];
+  openModal(x ? 'Editar serviço' : 'Novo serviço', `
+    <div class="grid2">
+      <label class="full">Nome do serviço *<input id="sf_nome" value="${esc(x?.nome)}" placeholder="Ex.: Formatação com backup"></label>
+      <label>Categoria<input id="sf_cat" list="sf_cats" value="${esc(x?.categoria)}" placeholder="Ex.: Manutenção, Rede, Impressora"><datalist id="sf_cats">${cats.map((c) => `<option value="${esc(c)}">`).join('')}</datalist></label>
+      <label>Preço padrão (R$)<input id="sf_preco" inputmode="decimal" value="${x ? f2(x.preco) : ''}" placeholder="0,00"></label>
+      <label class="full">Descrição (opcional)<input id="sf_desc" value="${esc(x?.descricao)}" placeholder="O que está incluído"></label>
+      ${x ? `<label class="chk"><input type="checkbox" id="sf_ativo" ${x.ativo ? 'checked' : ''}> Serviço ativo (aparece na venda)</label>` : ''}
+    </div>
+    <p class="hint">O preço padrão é só uma sugestão: na venda você pode mudar o valor e a descrição.</p>`,
+    `${x ? `<button class="btn btn-danger" style="margin-right:auto" onclick="excluirServico(${x.id})">Excluir</button>` : ''}<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="sf_go" onclick="salvarServico(${x?.id || 'null'})">Salvar</button>`);
+}
+async function salvarServico(id) {
+  const nome = $('#sf_nome').value.trim();
+  if (!nome) return toast('Informe o nome do serviço', 'erro');
+  const body = { nome, categoria: $('#sf_cat').value.trim() || null, preco: r2(num($('#sf_preco').value) || 0), descricao: $('#sf_desc').value.trim() || null };
+  if (id) body.ativo = $('#sf_ativo').checked;
+  $('#sf_go').disabled = true;
+  const r = id ? await sb.from('servicos').update(body).eq('id', id) : await sb.from('servicos').insert(body);
+  if (r.error) { $('#sf_go').disabled = false; return erro(/servicos_nome_uq|duplicate/i.test(r.error.message) ? { message: 'Já existe um serviço com esse nome' } : r.error); }
+  closeModal(); toast('Serviço salvo ✔'); telaServicos();
+}
+async function excluirServico(id) {
+  if (!confirm('Excluir este serviço do cadastro? As vendas antigas continuam com a descrição dele. (Se preferir, só desmarque "Serviço ativo".)')) return;
+  const { error } = await sb.from('servicos').delete().eq('id', id);
+  if (error) return erro(error);
+  closeModal(); toast('Serviço excluído'); telaServicos();
 }
 
 /* ====================== CLIENTES ====================== */
@@ -2124,7 +2235,7 @@ async function excluirConta(id, tipo) {
 
 /* ====================== RELATÓRIOS ====================== */
 let relTipo = 'vendas';
-let relFil = { ini: '', fim: '', cliente: '', categoria: '', banco: '', catfin: '', situacao: '', contaTipo: 'ambos' };
+let relFil = { ini: '', fim: '', cliente: '', categoria: '', itemTipo: '', banco: '', catfin: '', situacao: '', contaTipo: 'ambos' };
 let relAtual = null;
 const pctFmt = (n) => (isFinite(n) ? pct(n) : '—');
 function relPeriodo(q) {
@@ -2142,7 +2253,8 @@ async function telaRelatorios() {
   const cats = catsFinProd();
   const filtros = {
     vendas: `<select onchange="relFil.cliente=this.value;gerarRel()"><option value="">Todos os clientes</option><option value="0" ${relFil.cliente === '0' ? 'selected' : ''}>Consumidor (sem cadastro)</option>${clientes.map((c) => `<option value="${c.id}" ${relFil.cliente == c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select>
-             <select onchange="relFil.categoria=this.value;gerarRel()"><option value="">Todas as categorias de produto</option>${cats.map((c) => `<option ${relFil.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`,
+             <select onchange="relFil.itemTipo=this.value;gerarRel()">${[['', 'Produtos e serviços'], ['produto', 'Só produtos'], ['servico', 'Só serviços']].map(([v, t]) => `<option value="${v}" ${relFil.itemTipo === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+             <select onchange="relFil.categoria=this.value;gerarRel()"><option value="">Todas as categorias</option><optgroup label="Produtos">${cats.map((c) => `<option ${relFil.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</optgroup><optgroup label="Serviços">${[...new Set([...servicos.map((x) => x.categoria).filter(Boolean), 'Serviço avulso'])].sort((a, b) => a.localeCompare(b)).map((c) => `<option ${relFil.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</optgroup></select>`,
     estoque: `<select onchange="relFil.categoria=this.value;gerarRel()"><option value="">Todas as categorias</option>${cats.map((c) => `<option ${relFil.categoria === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
               <select onchange="relFil.situacao=this.value;gerarRel()">${[['', 'Todos os produtos'], ['baixo', 'Só estoque baixo / zerado'], ['com', 'Só com estoque']].map(([v, t]) => `<option value="${v}" ${relFil.situacao === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`,
     caixa: `<select onchange="relFil.banco=this.value;gerarRel()"><option value="">Todas as contas / bancos</option>${bancos.map((b) => `<option value="${b.id}" ${relFil.banco == b.id ? 'selected' : ''}>${esc(b.nome)}</option>`).join('')}</select>
@@ -2186,29 +2298,42 @@ function renderRel(r) {
 
 async function relVendas() {
   const { ini, fim } = relFil;
-  const vs = await fetchAll(() => sb.from('vendas').select('id,data,cliente_id,cliente_nome,forma_pagamento,vendedor,total,tipo,status,venda_itens(produto_id,produto_nome,quantidade,preco_unit,venda_custos(custo_unit))')
+  const vs = await fetchAll(() => sb.from('vendas').select('id,data,cliente_id,cliente_nome,forma_pagamento,vendedor,total,tipo,status,venda_itens(produto_id,produto_nome,quantidade,preco_unit,tipo,servico_id,venda_custos(custo_unit))')
     .eq('status', 'concluida').gte('data', inicioDia(ini).toISOString()).lt('data', isoMais1(fim)).order('data'));
   const catDe = new Map(produtos.map((p) => [p.id, p.categoria || '']));
   const filtroCli = (v) => !relFil.cliente || (relFil.cliente === '0' ? !v.cliente_id : v.cliente_id == relFil.cliente);
+  if (!servicos.length) await carregarServicos();
   const itens = [];
   vs.filter(filtroCli).forEach((v) => v.venda_itens.forEach((i) => {
-    if (relFil.categoria && catDe.get(i.produto_id) !== relFil.categoria) return;
+    const svc = i.tipo === 'servico', sv = svc && i.servico_id ? serv(i.servico_id) : null;
+    const cat = svc ? (i.servico_id ? sv?.categoria || 'Serviços sem categoria' : 'Serviço avulso') : catDe.get(i.produto_id);
+    if (relFil.itemTipo && (svc ? 'servico' : 'produto') !== relFil.itemTipo) return;
+    if (relFil.categoria && cat !== relFil.categoria) return;
     const cu = Number((Array.isArray(i.venda_custos) ? i.venda_custos[0] : i.venda_custos)?.custo_unit || 0);
-    itens.push({ v, nome: i.produto_nome, qtd: i.quantidade, fat: i.quantidade * Number(i.preco_unit), cus: i.quantidade * cu });
+    itens.push({ v, svc, cat: cat || 'Sem categoria', nome: i.produto_nome, sNome: svc ? (sv ? sv.nome : 'Avulso: ' + i.produto_nome) : null, qtd: i.quantidade, fat: i.quantidade * Number(i.preco_unit), cus: i.quantidade * cu });
   }));
   const vend = itens.filter((x) => x.v.tipo === 'venda'), sai = itens.filter((x) => x.v.tipo === 'saida');
   const fat = vend.reduce((s, x) => s + x.fat, 0), cus = vend.reduce((s, x) => s + x.cus, 0), cSai = sai.reduce((s, x) => s + x.cus, 0);
   const nV = new Set(vend.map((x) => x.v.id)).size;
-  const linha = ([k, o]) => [k, o.qtd, brl(o.fat), brl(o.cus), brl(o.fat - o.cus), pctFmt(margemPor(o.cus, o.fat))];
+  const vP = vend.filter((x) => !x.svc), vS = vend.filter((x) => x.svc);
+  const fatP = vP.reduce((s, x) => s + x.fat, 0), fatS = vS.reduce((s, x) => s + x.fat, 0);
+  const linha = ([k, o]) => [k, o.qtd, brl(o.fat), brl(o.cus), brl(o.fat - o.cus), o.cus ? pctFmt(margemPor(o.cus, o.fat)) : '—'];
   const ord = (a) => a.sort((x, y) => y[1].fat - x[1].fat);
   const cab = (n) => [n, 'Qtd itens', 'Faturamento', 'Custo', 'Lucro', 'Margem'];
   const N = [1, 2, 3, 4, 5];
   return {
     titulo: 'Relatório de vendas',
     resumo: [['Vendas', nV], ['Faturamento', brl(fat)], ['Custo das mercadorias', brl(cus)], ['Lucro das vendas', brl(fat - cus), 'var(--ok)'], ['Margem sobre o custo', pctFmt(margemPor(cus, fat))],
-      ['Ticket médio', brl(nV ? fat / nV : 0)], ['Itens vendidos', vend.reduce((s, x) => s + x.qtd, 0)], ['Custo das saídas sem venda', brl(cSai), 'var(--bad)'], ['Lucro real', brl(fat - cus - cSai), fat - cus - cSai < 0 ? 'var(--bad)' : 'var(--ok)']],
+      ['Ticket médio', brl(nV ? fat / nV : 0)], ['Faturamento em produtos', brl(fatP)], ['Faturamento em serviços', brl(fatS)], ['Produtos vendidos (un)', vP.reduce((s, x) => s + x.qtd, 0)], ['Serviços feitos', vS.reduce((s, x) => s + x.qtd, 0)], ['Custo das saídas sem venda', brl(cSai), 'var(--bad)'], ['Lucro real', brl(fat - cus - cSai), fat - cus - cSai < 0 ? 'var(--bad)' : 'var(--ok)']],
     secoes: [
-      { titulo: 'Por produto', cab: cab('Produto'), num: N, linhas: ord(agrupa(vend, (x) => x.nome, ['qtd', 'fat', 'cus'])).map(linha) },
+      { titulo: 'Produtos x serviços', cab: cab('Tipo'), num: N, linhas: ord(agrupa(vend, (x) => (x.svc ? 'Serviços' : 'Produtos'), ['qtd', 'fat', 'cus'])).map(linha) },
+      ...(relFil.itemTipo === 'servico' ? [] : [{ titulo: 'Por produto', cab: cab('Produto'), num: N, linhas: ord(agrupa(vP, (x) => x.nome, ['qtd', 'fat', 'cus'])).map(linha) }]),
+      ...(relFil.itemTipo === 'produto' ? [] : [
+        { titulo: 'Por serviço', cab: cab('Serviço'), num: N, linhas: ord(agrupa(vS, (x) => x.sNome, ['qtd', 'fat', 'cus'])).map(linha) },
+        { titulo: 'Serviços por categoria', cab: cab('Categoria'), num: N, linhas: ord(agrupa(vS, (x) => x.cat, ['qtd', 'fat', 'cus'])).map(linha) },
+        { titulo: 'Serviços feitos (detalhado)', cab: ['Descrição', 'Data', 'Cliente', 'Venda', 'Qtd', 'Valor'], num: [4, 5], linhas: vS.map((x) => [x.nome, dataHoraBR(x.v.data), x.v.cliente_nome, '#' + x.v.id, x.qtd, brl(x.fat)]) },
+      ]),
+      ...(relFil.itemTipo ? [] : [{ titulo: 'Produtos por categoria', cab: cab('Categoria'), num: N, linhas: ord(agrupa(vP, (x) => x.cat, ['qtd', 'fat', 'cus'])).map(linha) }]),
       { titulo: 'Por cliente', cab: cab('Cliente'), num: N, linhas: ord(agrupa(vend, (x) => x.v.cliente_nome, ['qtd', 'fat', 'cus'])).map(linha) },
       { titulo: 'Por dia', cab: cab('Dia'), num: N, linhas: agrupa(vend, (x) => dataBR(x.v.data), ['qtd', 'fat', 'cus']).map(linha) },
       { titulo: 'Por forma de pagamento', cab: cab('Forma'), num: N, linhas: ord(agrupa(vend, (x) => x.v.forma_pagamento || '—', ['qtd', 'fat', 'cus'])).map(linha) },
@@ -2389,7 +2514,7 @@ async function mudarPapel(id, papel) {
 }
 async function backupJSON() {
   try {
-    const t = ['config', 'recibos', 'bancos', 'categorias', 'caixa', 'contas', 'produtos', 'produto_custos', 'notas', 'codigos_fornecedor', 'entradas', 'ajustes', 'clientes', 'precos_cliente', 'vendas', 'venda_itens', 'venda_custos'];
+    const t = ['config', 'recibos', 'bancos', 'categorias', 'caixa', 'contas', 'produtos', 'produto_custos', 'notas', 'codigos_fornecedor', 'entradas', 'ajustes', 'clientes', 'precos_cliente', 'servicos', 'vendas', 'venda_itens', 'venda_custos'];
     const out = { gerado_em: new Date().toISOString() };
     for (const n of t) out[n] = await fetchAll(() => sb.from(n).select('*'));
     baixar(`backup-estoque-beto-${hojeISO()}.json`, JSON.stringify(out, null, 1), 'application/json');
