@@ -1954,21 +1954,85 @@ async function telaCaixa() {
       </tbody></table>` : '<p class="muted">Nenhum lançamento neste mês.</p>';
   } catch (e) { erro(e); }
 }
+/* ---- dividir um valor em várias formas / bancos (caixa e baixa de contas) ---- */
+const splits = {};
+function splitAbrir(pref, totalId) {
+  const t = r2(num($('#' + totalId).value) || 0);
+  splits[pref] = { totalId, rows: [{ forma: 'Dinheiro', banco: bancoParaForma('Dinheiro'), valor: 0 }, { forma: 'Pix', banco: bancoParaForma('Pix'), valor: t }] };
+  $('#' + pref + '_um').classList.add('hide'); $('#' + pref + '_split').classList.remove('hide');
+  splitRender(pref);
+}
+function splitFechar(pref) {
+  delete splits[pref];
+  ['_um', '_um2', '_div'].forEach((k) => $('#' + pref + k)?.classList.remove('hide'));
+  $('#' + pref + '_split').classList.add('hide');
+}
+function splitRender(pref) {
+  const S = splits[pref]; if (!S) return;
+  $('#' + pref + '_rows').innerHTML = S.rows.map((r, i) => `<div style="border:1px solid var(--line);border-radius:9px;padding:8px;margin-top:6px;display:grid;grid-template-columns:1fr 1fr 110px 30px;gap:6px;align-items:center">
+      <select onchange="splits['${pref}'].rows[${i}].forma=this.value;splits['${pref}'].rows[${i}].banco=bancoParaForma(this.value);splitRender('${pref}')">${FORMAS.map((f) => `<option ${r.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select>
+      ${bancoSel(pref + '_b' + i, r.banco, `onchange="splits['${pref}'].rows[${i}].banco=+this.value"`)}
+      <input id="${pref}_v${i}" inputmode="decimal" placeholder="0,00" value="${r.valor ? f2(r.valor) : ''}" oninput="splitValor('${pref}',${i},this.value)">
+      <button class="xbtn" style="height:34px" title="Remover" onclick="splitRemover('${pref}',${i})">×</button></div>`).join('')
+    + `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:6px;gap:6px;flex-wrap:wrap">
+        <span><button class="link" onclick="splits['${pref}'].rows.push({forma:'Pix',banco:bancoParaForma('Pix'),valor:0});splitRender('${pref}')">+ outra forma / banco</button>
+        · <button class="link" onclick="splitFechar('${pref}')">voltar para uma forma só</button></span>
+        <span id="${pref}_st" style="font-size:13px"></span></div>`;
+  splitStatus(pref);
+}
+function splitRemover(pref, i) {
+  const S = splits[pref]; S.rows.splice(i, 1);
+  if (S.rows.length < 2) return splitFechar(pref);
+  splitRender(pref);
+}
+function splitValor(pref, i, v) {
+  const S = splits[pref]; S.rows[i].valor = num(v) || 0;
+  if (S.rows.length === 2) {
+    const o = 1 - i, resto = r2((num($('#' + S.totalId).value) || 0) - S.rows[i].valor);
+    S.rows[o].valor = resto > 0 ? resto : 0;
+    const inp = $('#' + pref + '_v' + o); if (inp) inp.value = S.rows[o].valor ? f2(S.rows[o].valor) : '';
+  }
+  splitStatus(pref);
+}
+function splitTotalMudou(pref) {
+  const S = splits[pref]; if (!S) return;
+  if (S.rows.length === 2) splitValor(pref, 0, f2(S.rows[0].valor)); else splitStatus(pref);
+}
+function splitDif(pref) { const S = splits[pref]; return r2((num($('#' + S.totalId).value) || 0) - S.rows.reduce((s, r) => s + (r.valor || 0), 0)); }
+function splitStatus(pref) {
+  const el = $('#' + pref + '_st'); if (!el) return;
+  const d = splitDif(pref);
+  el.innerHTML = Math.abs(d) < 0.01 ? '<span style="color:var(--ok)">✔ Soma confere</span>' : d > 0 ? `<span style="color:var(--bad)">Falta ${brl(d)}</span>` : `<span style="color:var(--bad)">Passou ${brl(-d)}</span>`;
+}
+function splitValida(pref) {
+  const S = splits[pref];
+  if (S.rows.some((r) => !(r.valor > 0))) { toast('Preencha o valor de cada parte', 'erro'); return false; }
+  const d = splitDif(pref);
+  if (Math.abs(d) >= 0.01) { toast(d > 0 ? `A soma das partes está faltando ${brl(d)}` : `A soma das partes passou ${brl(-d)} do total`, 'erro'); return false; }
+  return true;
+}
+const splitTexto = (pref) => splits[pref].rows.map((r) => `${r.forma} ${brl(r.valor)}`).join(' + ');
+
 function formCaixa(tipo, id) {
   const x = id ? caixaCache.find((c) => c.id === id) : null;
   if (x) tipo = x.tipo;
   const travado = !!x?.conta_id;
+  delete splits.cf;
   const formas = x?.forma && !FORMAS.includes(x.forma) ? [x.forma, ...FORMAS] : FORMAS;
   openModal(x ? `Editar ${tipo === 'entrada' ? 'entrada' : 'saída'}` : (tipo === 'entrada' ? '+ Entrada no caixa' : '− Saída do caixa'), `
     <div class="grid2">
       <label>Tipo<select id="cf_tipo" ${travado ? 'disabled' : ''} onchange="$('#cf_catw').innerHTML=catSel('cf_cat',this.value,$('#cf_cat').value)"><option value="entrada" ${tipo === 'entrada' ? 'selected' : ''}>Entrada (+)</option><option value="saida" ${tipo === 'saida' ? 'selected' : ''}>Saída (−)</option></select></label>
       <label>Data<input id="cf_data" type="date" value="${x?.data || hojeISO()}"></label>
       <label class="full">Descrição *<input id="cf_desc" value="${esc(x?.descricao || '')}" placeholder="${tipo === 'entrada' ? 'Ex.: Serviço de formatação' : 'Ex.: Conta de energia'}"></label>
-      <label>Valor (R$) *<input id="cf_val" inputmode="decimal" value="${x ? f2(x.valor) : ''}" placeholder="0,00" ${travado ? 'disabled' : ''}></label>
-      <label>Conta / banco *${bancoSel('cf_banco', x?.banco_id)}</label>
+      <label>Valor${x ? '' : ' total'} (R$) *<input id="cf_val" inputmode="decimal" value="${x ? f2(x.valor) : ''}" placeholder="0,00" ${travado ? 'disabled' : ''} oninput="splitTotalMudou('cf')"></label>
       <label>Categoria<span id="cf_catw">${catSel('cf_cat', tipo, x?.categoria)}</span></label>
-      <label>Forma<select id="cf_forma"><option></option>${formas.map((f) => `<option ${x?.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+      <div id="cf_um" style="display:contents">
+        <label>Conta / banco *${bancoSel('cf_banco', x?.banco_id)}</label>
+        <label>Forma<select id="cf_forma"><option></option>${formas.map((f) => `<option ${x?.forma === f ? 'selected' : ''}>${f}</option>`).join('')}</select></label>
+      </div>
     </div>
+    ${x ? '' : `<button class="link" id="cf_div" style="font-size:13px;margin-top:6px" onclick="this.classList.add('hide');splitAbrir('cf','cf_val')">➗ Dividir em mais de uma forma / banco (ex.: parte dinheiro, parte Pix)</button>
+    <div id="cf_split" class="hide"><label style="margin-top:8px">Como ${tipo === 'saida' ? 'saiu' : 'entrou'}: forma · conta/banco · valor</label><div id="cf_rows"></div></div>`}
     ${travado ? '<p class="hint">Este lançamento veio da baixa de uma conta. Para mudar o valor, use "Desfazer baixa" na conta e dê baixa de novo.</p>' : ''}
     ${x?.venda_id ? `<p class="hint">Lançamento da venda #${x.venda_id}. Alterar aqui muda só o caixa, não a venda.</p>` : ''}
     <p class="hint">Faltou categoria ou banco? Cadastre em <b>Financeiro → 🏦 Bancos e categorias</b>.</p>`,
@@ -1978,6 +2042,15 @@ async function salvarCaixa(id) {
   const v = num($('#cf_val').value), d = $('#cf_desc').value.trim();
   if (!d) return toast('Informe a descrição', 'erro');
   if (!(v > 0)) return toast('Informe o valor', 'erro');
+  if (!id && splits.cf) {
+    if (!splitValida('cf')) return;
+    const base = { data: $('#cf_data').value || hojeISO(), descricao: d, categoria: $('#cf_cat').value || null, tipo: $('#cf_tipo').value, usuario: me.nome };
+    $('#cf_go').disabled = true;
+    const { error } = await sb.from('caixa').insert(splits.cf.rows.map((r) => ({ ...base, valor: r2(r.valor), forma: r.forma, banco_id: r.banco || bancoPadrao() })));
+    if (error) { $('#cf_go').disabled = false; return erro(error); }
+    delete splits.cf;
+    closeModal(); toast('Lançamentos salvos ✔'); telaCaixa(); return;
+  }
   if (!$('#cf_banco').value) return toast('Cadastre um banco/conta primeiro', 'erro');
   const body = { data: $('#cf_data').value || hojeISO(), descricao: d, categoria: $('#cf_cat').value || null, forma: $('#cf_forma').value || null, banco_id: +$('#cf_banco').value };
   if (!$('#cf_val').disabled) body.valor = r2(v);
@@ -2199,22 +2272,29 @@ async function salvarConta(tipo) {
 }
 function formBaixa(id, tipo) {
   const c = contasCache.find((x) => x.id === id), R = tipo === 'receber';
+  delete splits.bx;
   openModal(R ? 'Receber conta' : 'Pagar conta', `
     <p><b>${esc(c.descricao)}</b>${c.parcela ? ` (${esc(c.parcela)})` : ''}${c.pessoa ? ` · ${esc(c.pessoa)}` : ''}<br><span class="muted">Vencimento ${dataBR(c.vencimento)} · ${brl(c.valor)}</span></p>
     <div class="grid3">
       <label>Data do ${R ? 'recebimento' : 'pagamento'}<input id="bx_data" type="date" value="${hojeISO()}"></label>
-      <label>Valor ${R ? 'recebido' : 'pago'} (R$)<input id="bx_val" inputmode="decimal" value="${f2(c.valor)}"></label>
-      <label>Forma<select id="bx_forma">${FORMAS.map((f) => `<option>${f}</option>`).join('')}</select></label>
+      <label>Valor ${R ? 'recebido' : 'pago'} (R$)<input id="bx_val" inputmode="decimal" value="${f2(c.valor)}" oninput="splitTotalMudou('bx')"></label>
+      <div id="bx_um" style="display:contents"><label>Forma<select id="bx_forma" onchange="$('#bx_banco').value=bancoParaForma(this.value)">${FORMAS.map((f) => `<option>${f}</option>`).join('')}</select></label></div>
     </div>
     <label class="chk" style="margin-top:12px"><input type="checkbox" id="bx_cx" checked onchange="$('#bx_bw').style.display=this.checked?'':'none'"> Lançar ${R ? 'entrada' : 'saída'} no fluxo de caixa</label>
-    <label id="bx_bw" style="margin-top:8px;max-width:320px">${R ? 'Entrou em' : 'Saiu de'} (conta / banco)${bancoSel('bx_banco')}</label>`,
+    <div id="bx_bw"><label id="bx_um2" style="margin-top:8px;max-width:320px">${R ? 'Entrou em' : 'Saiu de'} (conta / banco)${bancoSel('bx_banco', bancoParaForma('Dinheiro'))}</label></div>
+    <button class="link" id="bx_div" style="font-size:13px;margin-top:8px" onclick="this.classList.add('hide');$('#bx_um2').classList.add('hide');splitAbrir('bx','bx_val')">➗ ${R ? 'Recebi' : 'Paguei'} em mais de uma forma / banco (ex.: parte dinheiro, parte Pix)</button>
+    <div id="bx_split" class="hide"><label style="margin-top:8px">Como ${R ? 'recebeu' : 'pagou'}: forma · conta/banco · valor</label><div id="bx_rows"></div></div>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-ok" id="bx_go" onclick="salvarBaixa(${id},'${tipo}')">Confirmar ${R ? 'recebimento' : 'pagamento'}</button>`);
 }
 async function salvarBaixa(id, tipo) {
   const v = num($('#bx_val').value);
   if (!(v > 0)) return toast('Informe o valor', 'erro');
+  const div = !!splits.bx;
+  if (div && !splitValida('bx')) return;
   $('#bx_go').disabled = true;
-  const { error } = await sb.rpc('baixar_conta', { p_id: id, p_data: $('#bx_data').value || hojeISO(), p_valor: r2(v), p_forma: $('#bx_forma').value, p_caixa: $('#bx_cx').checked, p_banco: +$('#bx_banco').value || null });
+  const { error } = await sb.rpc('baixar_conta', { p_id: id, p_data: $('#bx_data').value || hojeISO(), p_valor: r2(v), p_forma: div ? splitTexto('bx') : $('#bx_forma').value, p_caixa: $('#bx_cx').checked,
+    p_banco: div ? null : (+$('#bx_banco').value || null), p_pagamentos: div ? splits.bx.rows.map((r) => ({ forma: r.forma, banco_id: r.banco || bancoPadrao(), valor: r2(r.valor) })) : null });
+  if (!error) delete splits.bx;
   if (error) { $('#bx_go').disabled = false; return erro(error); }
   closeModal(); toast(tipo === 'receber' ? 'Recebimento registrado ✔' : 'Pagamento registrado ✔'); listaContas(tipo);
 }
