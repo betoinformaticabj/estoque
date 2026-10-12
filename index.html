@@ -2505,7 +2505,7 @@ async function relEstoque() {
   const { ini, fim } = relFil;
   const [ents, its, ajs] = await Promise.all([
     fetchAll(() => sb.from('entradas').select('produto_id,quantidade,custo_unit').gte('data', ini).lte('data', fim)),
-    fetchAll(() => sb.from('venda_itens').select('produto_id,quantidade,vendas!inner(data,status,tipo)').eq('vendas.status', 'concluida').gte('vendas.data', inicioDia(ini).toISOString()).lt('vendas.data', isoMais1(fim))),
+    fetchAll(() => sb.from('venda_itens').select('produto_id,quantidade,preco_unit,vendas!inner(data,status,tipo)').not('produto_id', 'is', null).eq('vendas.status', 'concluida').gte('vendas.data', inicioDia(ini).toISOString()).lt('vendas.data', isoMais1(fim))),
     fetchAll(() => sb.from('ajustes').select('produto_id,quantidade_anterior,quantidade_nova').gte('criado_em', inicioDia(ini).toISOString()).lt('criado_em', isoMais1(fim))),
   ]);
   let ps = produtos.filter((p) => p.ativo && (!relFil.categoria || p.categoria === relFil.categoria));
@@ -2520,11 +2520,24 @@ async function relEstoque() {
   const tq = ps.reduce((s, p) => s + Math.max(0, p.estoque), 0), tc = ps.reduce((s, p) => s + Math.max(0, p.estoque) * cu(p), 0);
   const ta = ps.reduce((s, p) => s + Math.max(0, p.estoque) * Number(p.preco_atacado), 0), tv = ps.reduce((s, p) => s + Math.max(0, p.estoque) * Number(p.preco_varejo), 0);
   const parados = ps.filter((p) => p.estoque > 0 && !mov.get(p.id).vend);
+  // reposição: tudo que saiu no período (vendas + saídas sem venda), com custo de hoje para recomprar
+  const rep = new Map();
+  its.forEach((i) => {
+    const pr = prod(i.produto_id); if (!pr || (relFil.categoria && pr.categoria !== relFil.categoria)) return;
+    const o = rep.get(pr.id) || { p: pr, vend: 0, sai: 0, fat: 0 };
+    if (i.vendas.tipo === 'saida') o.sai += i.quantidade; else { o.vend += i.quantidade; o.fat += i.quantidade * Number(i.preco_unit); }
+    rep.set(pr.id, o);
+  });
+  const repL = [...rep.values()].map((o) => ({ ...o, q: o.vend + o.sai, cr: (o.vend + o.sai) * cu(o.p) })).sort((a, b) => b.cr - a.cr);
+  const repCusto = repL.reduce((s, o) => s + o.cr, 0), repFat = repL.reduce((s, o) => s + o.fat, 0);
   return {
     titulo: 'Relatório de estoque',
-    resumo: [['Produtos', ps.length], ['Unidades em estoque', tq], ['Estoque a preço de custo', brl(tc)], ['Estoque a preço de atacado', brl(ta)], ['Estoque a preço de varejo', brl(tv)], ['Lucro potencial (varejo)', brl(tv - tc), 'var(--ok)'],
+    resumo: [['Custo para repor o que saiu no período', brl(repCusto), 'var(--bad)'], ['Valor vendido desses produtos', brl(repFat), 'var(--ok)'], ['Produtos', ps.length], ['Unidades em estoque', tq], ['Estoque a preço de custo', brl(tc)], ['Estoque a preço de atacado', brl(ta)], ['Estoque a preço de varejo', brl(tv)], ['Lucro potencial (varejo)', brl(tv - tc), 'var(--ok)'],
       ['Estoque baixo / zerado', ps.filter((p) => p.estoque <= 0 || (p.estoque_minimo > 0 && p.estoque <= p.estoque_minimo)).length, 'var(--warn)']],
     secoes: [
+      { titulo: 'Reposição — produtos que saíram no período (quanto custa repor)', cab: ['Produto', 'Vendidos', 'Saídas sem venda', 'Total que saiu', 'Valor vendido', 'Custo un. (hoje)', 'Custo para repor', 'Estoque hoje'], num: [1, 2, 3, 4, 5, 6, 7],
+        linhas: repL.map((o) => [o.p.nome, o.vend, o.sai, o.q, brl(o.fat), brl(cu(o.p)), brl(o.cr), o.p.estoque]),
+        total: repL.length ? ['TOTAL', repL.reduce((s, o) => s + o.vend, 0), repL.reduce((s, o) => s + o.sai, 0), repL.reduce((s, o) => s + o.q, 0), brl(repFat), '', brl(repCusto), ''] : null },
       { titulo: 'Posição atual do estoque', cab: ['Produto', 'Categoria', 'Qtd', 'Custo un.', 'Custo total', 'Atacado', 'Varejo', 'Varejo total'], num: [2, 3, 4, 5, 6, 7],
         linhas: ps.map((p) => [p.nome, p.categoria || '', p.estoque, brl(cu(p)), brl(Math.max(0, p.estoque) * cu(p)), brl(p.preco_atacado), brl(p.preco_varejo), brl(Math.max(0, p.estoque) * p.preco_varejo)]),
         total: ['TOTAL', '', tq, '', brl(tc), '', '', brl(tv)] },
