@@ -1786,7 +1786,7 @@ function pdfRecibo(r, modo) {
 
 /* ====================== FINANCEIRO ====================== */
 let finAba = 'caixa';
-let finFil = { mes: '', status: 'aberta', busca: '', banco: '' };
+let finFil = { mes: '', status: 'aberta', busca: '', banco: '', ordem: 'lanc' };
 let bancos = [], catsFin = [];
 const mesAtual = () => hojeISO().slice(0, 7);
 const fimMes = (m) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm, 0); return `${m}-${String(d.getDate()).padStart(2, '0')}`; };
@@ -1917,6 +1917,7 @@ async function telaCaixa() {
     <div class="kpis" id="cx_bancos"></div>
     <div class="card filtros">
       <label style="flex-direction:row;align-items:center;gap:8px">Mês <input type="month" value="${finFil.mes}" style="width:auto" onchange="finFil.mes=this.value||mesAtual();telaCaixa()"></label>
+      <select style="flex:0 1 230px" title="Ordem da lista" onchange="finFil.ordem=this.value;telaCaixa()"><option value="lanc" ${finFil.ordem !== 'data' ? 'selected' : ''}>Ordem: como fui lançando</option><option value="data" ${finFil.ordem === 'data' ? 'selected' : ''}>Ordem: pela data</option></select>
       <select style="flex:0 1 220px" onchange="finFil.banco=this.value;telaCaixa()"><option value="">Todas as contas</option>${bancos.map((b) => `<option value="${b.id}" ${bf === b.id ? 'selected' : ''}>${esc(b.nome)}${b.ativo ? '' : ' (inativa)'}</option>`).join('')}</select>
       <div class="actions" style="margin-left:auto"><button class="btn btn-ok" onclick="formCaixa('entrada')">+ Entrada</button><button class="btn btn-danger" onclick="formCaixa('saida')">− Saída</button><button class="btn" onclick="formTransf()">⇄ Transferir</button></div>
     </div>
@@ -1939,6 +1940,7 @@ async function telaCaixa() {
     const inicial = bf ? Number(bancos.find((b) => b.id === bf)?.saldo_inicial || 0) : bancos.reduce((s, b) => s + Number(b.saldo_inicial || 0), 0);
     const sAnt = inicial + todos.filter((x) => x.data < ini && naConta(x)).reduce((s, x) => s + sinal(x), 0);
     const l = l0.filter(naConta);
+    if (finFil.ordem !== 'data') l.sort((a, b) => a.id - b.id); // na sequência em que foi lançado
     const conta = (x) => bf || x.categoria !== 'Transferência';
     const ent = l.filter((x) => x.tipo === 'entrada' && conta(x)).reduce((s, x) => s + Number(x.valor), 0);
     const sai = l.filter((x) => x.tipo === 'saida' && conta(x)).reduce((s, x) => s + Number(x.valor), 0);
@@ -1953,7 +1955,7 @@ async function telaCaixa() {
     l.reverse(); caixaCache = l;
     $('#cx_l').innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Data</th><th>Descrição</th><th>Conta</th><th class="num">Valor</th><th class="num">Saldo</th><th></th></tr></thead><tbody>
       ${l.map((x) => `<tr>
-        <td>${dataBR(x.data)}</td>
+        <td>${dataBR(x.data)}${x.criado_em && finFil.ordem !== 'data' ? `<div class="sub">lançado ${new Date(x.criado_em).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}</div>` : ''}</td>
         <td><span class="pn">${esc(x.descricao)}</span><div class="sub">${esc([x.categoria, x.forma, x.usuario].filter(Boolean).join(' · '))}</div></td>
         <td data-l="Conta">${esc(nomeBanco(x.banco_id))}</td>
         <td class="num" data-l="Valor"><b style="color:${x.tipo === 'entrada' ? 'var(--ok)' : 'var(--bad)'}">${x.tipo === 'entrada' ? '+' : '−'} ${brl(x.valor)}</b></td>
