@@ -782,7 +782,7 @@ function telaEntrada() {
     </div></div>
     <div class="card">
       <div class="grid4">
-        <label>Fornecedor<input id="en_forn" list="dl_forn" value="${esc(ent.fornecedor)}" oninput="ent.fornecedor=this.value" onchange="checarNota()"></label>
+        <label>Fornecedor<input id="en_forn" list="dl_forn" value="${esc(ent.fornecedor)}" oninput="ent.fornecedor=this.value" onchange="checarNota();carregarFornProd().then(()=>renderEntrada())"></label>
         <datalist id="dl_forn"></datalist>
         <label>Nº da nota<input id="en_doc" value="${esc(ent.documento)}" oninput="ent.documento=this.value" onchange="checarNota()"></label>
         <label>Data<input id="en_data" type="date" value="${ent.data}" onchange="ent.data=this.value"></label>
@@ -841,6 +841,52 @@ function renderExistente() {
   el.innerHTML = x ? `<div class="alert info">Esta nota já tem <b>${x.itens} item(ns)</b> lançado(s) (${brl(x.soma)} em produtos, frete ${brl(x.frete)}). Os itens abaixo vão entrar <b>na mesma nota</b> e o frete será redividido entre todos.</div>` : '';
 }
 
+/* ---------- produto parecido já cadastrado ---------- */
+const STOP_NOME = new Set(['de', 'da', 'do', 'das', 'dos', 'com', 'para', 'p', 'c', 'e', 'em', 'un', 'und', 'unid', 'pc', 'pcs', 'pct']);
+const tokensNome = (s) => norm(s).replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w.length >= 2 && !STOP_NOME.has(w));
+function simNome(a, b) {
+  const A = tokensNome(a), B = tokensNome(b);
+  if (!A.length || !B.length) return 0;
+  if (A.join(' ') === B.join(' ')) return 1;
+  const usado = new Set(); let inter = 0;
+  for (const x of A) {
+    const j = B.findIndex((y, k) => !usado.has(k) && (y === x || (x.length >= 4 && y.length >= 4 && (y.startsWith(x) || x.startsWith(y)))));
+    if (j >= 0) { usado.add(j); inter++; }
+  }
+  let sc = (2 * inter) / (A.length + B.length);
+  const mA = A.filter((w) => /\d/.test(w)), mB = B.filter((w) => /\d/.test(w)); // números/modelos (664, 85a, 2tb…)
+  if (mA.length && mB.length) sc = mA.some((w) => mB.includes(w)) ? Math.min(0.99, sc + 0.15) : sc * 0.5;
+  return sc;
+}
+// produtos que já vieram deste fornecedor (pelo CNPJ ou pelo nome)
+async function carregarFornProd() {
+  ent.fornProd = new Map();
+  const f = (ent.fornecedor || '').trim().replace(/[%_,()]/g, ''), cnpj = ent.cnpj;
+  if (!f && !cnpj) return;
+  try {
+    let qn = sb.from('notas').select('id'); qn = cnpj ? qn.or(`cnpj.eq.${cnpj}` + (f ? `,fornecedor.ilike.${f}` : '')) : qn.ilike('fornecedor', f);
+    const { data: ns } = await qn.limit(500);
+    const ids = (ns || []).map((n) => n.id);
+    const reqs = [];
+    if (ids.length) reqs.push(sb.from('entradas').select('produto_id,preco_compra,data').in('nota_id', ids).order('id', { ascending: false }).limit(2000));
+    if (f) reqs.push(sb.from('entradas').select('produto_id,preco_compra,data').ilike('fornecedor', f).order('id', { ascending: false }).limit(2000));
+    const rs = await Promise.all(reqs);
+    rs.forEach((r) => (r.data || []).forEach((e) => { if (!ent.fornProd.has(e.produto_id)) ent.fornProd.set(e.produto_id, e); }));
+  } catch (e) { }
+}
+function sugestoes(it) {
+  const nome = it.xml?.xProd || it.novo?.nome || '';
+  if (!nome.trim() || it.ignSug) return [];
+  const fp_ = ent.fornProd || new Map(), cod = it.xml?.cEAN || '';
+  return produtos.filter((p) => p.ativo).map((p) => {
+    let sc = simNome(nome, p.nome);
+    if (cod && p.codigo && p.codigo.trim() === cod) sc = 1;
+    const forn = fp_.get(p.id);
+    return { p, sc, forn, ord: sc + (forn ? 0.15 : 0) };
+  }).filter((x) => x.sc >= 0.5 || (x.forn && x.sc >= 0.3)).sort((a, b) => b.ord - a.ord).slice(0, 3);
+}
+function entVincularId(i, id) { const p = prod(id); if (p) { entVincular(i, p); toast(`Vinculado a "${p.nome}" ✔`); } }
+
 /* ---------- XML da NF-e ---------- */
 async function importarXML(file) {
   if (!file) return;
@@ -884,10 +930,11 @@ async function importarXML(file) {
     ent = { ...entNovo(), atualizar: ent.atualizar, itens, chave, cnpj,
       fornecedor: g(emit, 'xNome'), documento: g(ide, 'nNF'), data: (g(ide, 'dhEmi') || g(ide, 'dEmi')).slice(0, 10) || hojeISO(),
       fora: ufE && ufD ? ufE !== ufD : true, frete: gn(tot, 'vFrete'), imp: cfg.imposto_fora_pct };
+    await carregarFornProd();
     telaEntrada();
     await checarNota();
-    const aut = itens.filter((i) => i.pid).length;
-    toast(`XML lido: ${itens.length} item(ns) · ${aut} vinculado(s) automaticamente · ${itens.length - aut} novo(s)`);
+    const aut = itens.filter((i) => i.pid).length, parec = itens.filter((i) => !i.pid && sugestoes(i).length).length;
+    toast(`XML lido: ${itens.length} item(ns) · ${aut} vinculado(s) automaticamente · ${itens.length - aut} novo(s)` + (parec ? ` · ⚠ ${parec} parecem já cadastrados` : ''));
     if (itens.some((i) => i.xml.qCom % 1)) toast('Atenção: tem item com quantidade fracionada na nota — confira as quantidades.', 'erro');
   } catch (e) { erro(e); }
 }
@@ -914,6 +961,7 @@ function renderEntrada(soCalc) {
     box.innerHTML = !ent.itens.length ? `<div class="card"><p class="muted" style="margin:0">Importe o XML da nota fiscal ou busque os produtos acima para lançar manualmente.</p></div>` : `
       <div class="card">
         <h3 style="margin-top:0">${ent.itens.length} item(ns) nesta entrada</h3>
+        ${(() => { const n = ent.itens.filter((it) => !it.pid && sugestoes(it).length).length; return n ? `<div class="alert warn" style="margin:-4px 0 10px">⚠ <b>${n} item(ns)</b> marcado(s) como produto novo parece(m) já estar cadastrado(s). Confira os avisos amarelos abaixo antes de registrar.</div>` : ''; })()}
         ${ent.itens.map((it, i) => { const p = it.pid ? prod(it.pid) : null; return `
           <div class="item" style="${!p ? 'border-color:#9cc7fb' : ''}">
             <div class="item-top" style="grid-template-columns:1fr 90px 150px 34px">
@@ -926,7 +974,15 @@ function renderEntrada(soCalc) {
             <div style="margin-top:8px;font-size:14px">
             ${it.trocando ? `<div style="display:flex;gap:8px;align-items:center"><div style="flex:1">${picker('enp_' + i, 'Buscar o produto já cadastrado…')}</div><button class="btn btn-sm" onclick="entVincular(${i},'__novo')">É produto novo</button><button class="btn btn-sm" onclick="entTrocar(${i})">Cancelar</button></div>`
               : p ? `<span class="tag ok">✔ ${it.auto ? 'Vinculado automaticamente' : 'Vinculado'}</span> a <b>${esc(p.nome)}</b> · estoque ${p.estoque} → <b id="ens_${i}"></b> <button class="link" style="margin-left:6px" onclick="entTrocar(${i})">trocar</button>`
-              : `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end"><span class="tag blue" style="margin-bottom:10px">+ Produto novo</span>
+              : `${(() => { const sg = sugestoes(it); return sg.length ? `<div class="alert warn" style="margin:0 0 8px">
+                  <b>⚠ Parece que este produto já está cadastrado.</b> Confira e, se for o mesmo, clique em <b>Vincular</b>:
+                  ${sg.map((x) => `<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-top:1px dashed #f3d7a6;padding:6px 0">
+                    <div style="flex:1 1 260px"><b>${esc(x.p.nome)}</b> <span class="tag ${x.sc >= 0.8 ? 'ok' : ''}">${Math.round(x.sc * 100)}% parecido</span>
+                      ${x.forn ? `<span class="tag blue">✔ já comprado deste fornecedor${x.forn.data ? ' em ' + dataBR(String(x.forn.data).slice(0, 10)) : ''} por ${brl(x.forn.preco_compra)}</span>` : ''}
+                      <div class="muted" style="font-size:12px">${esc([x.p.categoria, x.p.marca, x.p.codigo ? 'cód. ' + x.p.codigo : ''].filter(Boolean).join(' · '))} · estoque ${x.p.estoque} · custo atual ${brl(x.p.c?.custo_final || 0)}</div></div>
+                    <button class="btn btn-sm btn-ok" onclick="entVincularId(${i},${x.p.id})">Vincular a este</button></div>`).join('')}
+                  <div style="text-align:right"><button class="link" onclick="ent.itens[${i}].ignSug=true;renderEntrada()">Não é nenhum desses — é produto novo mesmo</button></div></div>` : ''; })()}
+                <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:end"><span class="tag blue" style="margin-bottom:10px">+ Produto novo</span>
                   <label style="flex:2 1 220px">Nome do produto<input value="${esc(it.novo.nome)}" oninput="ent.itens[${i}].novo.nome=this.value"></label>
                   <label style="flex:1 1 130px">Categoria<input list="dl_cat2" value="${esc(it.novo.categoria)}" oninput="ent.itens[${i}].novo.categoria=this.value"></label>
                   <button class="link" style="margin-bottom:10px" onclick="entTrocar(${i})">vincular a um produto já cadastrado</button></div>`}
@@ -961,7 +1017,12 @@ function renderEntrada(soCalc) {
       Compra ${brl(it.compra)}${ent.fora ? ` + imposto ${fp(ent.imp)}% ${brl(vi)}` : ''}${ent.frete ? ` + frete ${brl(fu)}` : ''} = <b>Custo ${brl(novo)}</b>
       ${ant ? ` · antes ${brl(ant)} ${Math.abs(var_) >= 0.05 ? `<b>(${var_ > 0 ? '+' : ''}${pct(var_)})</b>` : '(igual)'}` : ''}
       <br>${atualiza ? `${semPreco ? 'Preços (margem padrão)' : `Custo subiu ${brl(dif)} → somado aos preços:`} → Atacado <b>${brl(na)}</b>${p && p.preco_atacado !== na ? ` <small>(era ${brl(p.preco_atacado)})</small>` : ''} · Varejo <b>${brl(nv)}</b>${p && p.preco_varejo !== nv ? ` <small>(era ${brl(p.preco_varejo)})</small>` : ''}`
-      : `${dif < 0 ? 'Custo caiu — preços mantidos' : 'Preços mantidos'} → Atacado ${brl(p.preco_atacado)} (${pct(margemPor(novo, p.preco_atacado))}) · Varejo ${brl(p.preco_varejo)} (${pct(margemPor(novo, p.preco_varejo))})`}
+      : `${dif < 0 ? 'Custo caiu — preços mantidos' : 'Preços mantidos'} → Atacado ${brl(p.preco_atacado)} (${pct(margemPor(it.usarAtual || dif >= 0 ? novo : ant, p.preco_atacado))}) · Varejo ${brl(p.preco_varejo)} (${pct(margemPor(it.usarAtual || dif >= 0 ? novo : ant, p.preco_varejo))})`}
+      ${dif < 0 ? `<div style="margin-top:6px;padding-top:6px;border-top:1px dashed currentColor">
+        <b>O custo desta compra (${brl(novo)}) ficou menor que o anterior (${brl(ant)}). Qual custo vai valer no cadastro?</b><br>
+        <label class="chk" style="display:inline-flex;margin-right:14px"><input type="radio" name="ecu_${i}" ${it.usarAtual ? '' : 'checked'} onchange="ent.itens[${i}].usarAtual=false;renderEntrada(true)"> Manter o anterior <b>${brl(ant)}</b> (maior)</label>
+        <label class="chk" style="display:inline-flex"><input type="radio" name="ecu_${i}" ${it.usarAtual ? 'checked' : ''} onchange="ent.itens[${i}].usarAtual=true;renderEntrada(true)"> Usar o desta compra <b>${brl(novo)}</b></label>
+      </div>` : ''}
     </div>`;
   });
   const r = $('#en_resumo');
@@ -979,12 +1040,14 @@ async function registrarEntrada() {
   if (ent.itens.some((i) => i.trocando)) return toast('Termine de vincular os produtos (ou clique em Cancelar)', 'erro');
   if (ent.itens.some((i) => !i.compra) && !confirm('Tem item com preço de compra zerado. Continuar?')) return;
   if (ent.frete > 0 && !ent.documento.trim() && !confirm('Sem nº da nota, o frete será dividido só entre os itens desta tela. Continuar?')) return;
+  const duvida = ent.itens.filter((i) => !i.pid && sugestoes(i).length);
+  if (duvida.length && !confirm(`Atenção: ${duvida.length} produto(s) novo(s) parecem já estar cadastrados:\n\n${duvida.map((i) => `• ${i.novo.nome}  →  parecido com "${sugestoes(i)[0].p.nome}"`).join('\n')}\n\nSe forem os mesmos, clique em Cancelar e use "Vincular a este". Cadastrar como novos mesmo assim?`)) return;
   const novos = ent.itens.filter((i) => !i.pid).length;
   if (novos && !confirm(`${novos} produto(s) novo(s) serão cadastrados com as margens padrão. Continuar?`)) return;
   $('#en_go').disabled = true;
   const { data, error } = await sb.rpc('registrar_nota', {
     p_nota: { fornecedor: ent.fornecedor, cnpj: ent.cnpj, numero: ent.documento, chave: ent.chave || null, data: ent.data, frete: r2(ent.frete), fora_estado: ent.fora, imposto_pct: ent.imp },
-    p_itens: ent.itens.map((i) => ({ produto_id: i.pid, quantidade: i.qtd, preco_compra: Math.round(i.compra * 10000) / 10000, novo: i.pid ? null : i.novo, codigo_fornecedor: i.xml?.cProd || null })),
+    p_itens: ent.itens.map((i) => ({ produto_id: i.pid, quantidade: i.qtd, preco_compra: Math.round(i.compra * 10000) / 10000, novo: i.pid ? null : i.novo, codigo_fornecedor: i.xml?.cProd || null, manter_custo: !!i.pid && !i.usarAtual })),
     p_atualizar_precos: ent.atualizar,
   });
   if (error) { $('#en_go').disabled = false; return erro(error); }
