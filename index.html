@@ -2470,7 +2470,7 @@ function relPeriodo(q) {
 async function telaRelatorios() {
   if (!relFil.ini) { relPeriodo('mes'); return; }
   if (!bancos.length) { try { await carregarBancos(); } catch (e) { } }
-  const T = [['vendas', '🛒 Vendas'], ['estoque', '📦 Estoque'], ['caixa', '💵 Fluxo de caixa'], ['contas', '📑 Contas a pagar/receber']];
+  const T = [['vendas', '🛒 Vendas'], ['estoque', '📦 Estoque'], ['caixa', '💵 Fluxo de caixa'], ['contas', '📑 Contas a pagar/receber'], ['pedido', '📝 Pedido de compra']];
   const cats = catsFinProd();
   const filtros = {
     vendas: `<select onchange="relFil.cliente=this.value;gerarRel()"><option value="">Todos os clientes</option><option value="0" ${relFil.cliente === '0' ? 'selected' : ''}>Consumidor (sem cadastro)</option>${clientes.map((c) => `<option value="${c.id}" ${relFil.cliente == c.id ? 'selected' : ''}>${esc(c.nome)}</option>`).join('')}</select>
@@ -2482,9 +2482,11 @@ async function telaRelatorios() {
             <select onchange="relFil.catfin=this.value;gerarRel()"><option value="">Todas as categorias</option>${[...new Set(catsFin.map((c) => c.nome))].map((c) => `<option ${relFil.catfin === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>`,
     contas: `<select onchange="relFil.contaTipo=this.value;gerarRel()">${[['ambos', 'A pagar e a receber'], ['pagar', 'Só a pagar'], ['receber', 'Só a receber']].map(([v, t]) => `<option value="${v}" ${relFil.contaTipo === v ? 'selected' : ''}>${t}</option>`).join('')}</select>`,
   };
+  const abasRel = `<div class="seg" style="max-width:1000px;overflow-x:auto">${T.map(([v, t]) => `<button class="${relTipo === v ? 'on' : ''}" onclick="relTipo='${v}';telaRelatorios()">${t}</button>`).join('')}</div>`;
+  if (relTipo === 'pedido') return telaPedido(abasRel);
   $('#main').innerHTML = `
     <div class="pagehead"><h1>Relatórios</h1><div class="actions"><button class="btn" onclick="imprimirRel()">🖨 Imprimir / PDF</button><button class="btn" onclick="csvRel()">⬇ Planilha</button></div></div>
-    <div class="seg" style="max-width:860px;overflow-x:auto">${T.map(([v, t]) => `<button class="${relTipo === v ? 'on' : ''}" onclick="relTipo='${v}';telaRelatorios()">${t}</button>`).join('')}</div>
+    ${abasRel}
     <div class="card filtros">
       <label style="flex-direction:row;align-items:center;gap:6px">De <input type="date" value="${relFil.ini}" style="width:auto" onchange="relFil.ini=this.value;gerarRel()"></label>
       <label style="flex-direction:row;align-items:center;gap:6px">até <input type="date" value="${relFil.fim}" style="width:auto" onchange="relFil.fim=this.value;gerarRel()"></label>
@@ -2501,6 +2503,201 @@ function agrupa(lista, chave, campos) {
   lista.forEach((x) => { const k = chave(x); const o = m.get(k) || Object.fromEntries(campos.map((c) => [c, 0])); campos.forEach((c) => o[c] += x[c] || 0); m.set(k, o); });
   return [...m.entries()];
 }
+/* ---------- PEDIDO DE COMPRA (para mandar ao fornecedor) ---------- */
+const pedido = { cats: new Set(), busca: '', soBaixo: false, soSel: false, sel: {}, avulsos: [], forn: '', obs: '', custo: false, saiu: new Map() };
+async function telaPedido(abasRel) {
+  const catsP = [...new Set(produtos.filter((p) => p.ativo).map((p) => p.categoria || 'Sem categoria'))].sort((a, b) => a.localeCompare(b));
+  const nCat = (c) => produtos.filter((p) => p.ativo && (p.categoria || 'Sem categoria') === c).length;
+  $('#main').innerHTML = `
+    <div class="pagehead"><h1>Relatórios</h1></div>
+    ${abasRel}
+    <div class="alert info" style="margin:0 0 12px">Monte o pedido para o seu distribuidor: escolha os segmentos, marque os produtos e coloque a quantidade. Depois gere o <b>PDF</b> ou <b>copie o texto</b> para mandar no WhatsApp. O PDF <b>não mostra</b> seus preços de venda.</div>
+    <div class="card">
+      <label style="margin-bottom:6px">Segmentos (categorias) — clique para escolher:</label>
+      <div style="display:flex;flex-wrap:wrap;gap:6px" id="pd_cats">
+        <button class="btn btn-sm ${pedido.cats.size ? '' : 'btn-primary'}" onclick="pedido.cats.clear();telaRelatorios()">Todos</button>
+        ${catsP.map((c) => `<button class="btn btn-sm ${pedido.cats.has(c) ? 'btn-primary' : ''}" onclick="pdCat('${esc(c).replace(/'/g, "\\'")}')">${esc(c)} <small>(${nCat(c)})</small></button>`).join('')}
+      </div>
+      <div class="filtros" style="margin-top:10px;padding:0;border:0;box-shadow:none">
+        <input placeholder="🔎 Buscar produto…" value="${esc(pedido.busca)}" oninput="pedido.busca=this.value;pdLista()">
+        <label class="chk"><input type="checkbox" ${pedido.soBaixo ? 'checked' : ''} onchange="pedido.soBaixo=this.checked;pdLista()"> Só estoque baixo / zerado</label>
+        <label class="chk"><input type="checkbox" ${pedido.soSel ? 'checked' : ''} onchange="pedido.soSel=this.checked;pdLista()"> Só os marcados</label>
+      </div>
+      <div class="filtros" style="margin-top:6px;padding:0;border:0;box-shadow:none;align-items:center">
+        <span class="muted" style="font-size:13px">Coluna "Saiu" = vendas + saídas entre</span>
+        <input type="date" value="${relFil.ini}" style="width:auto" onchange="relFil.ini=this.value;pdSaidas()">
+        <span class="muted">e</span>
+        <input type="date" value="${relFil.fim}" style="width:auto" onchange="relFil.fim=this.value;pdSaidas()">
+        <button class="btn btn-sm" onclick="pdSugerir()" title="Coloca como quantidade o que saiu no período, nos produtos que aparecem na lista">✨ Sugerir quantidades (o que saiu)</button>
+        <button class="btn btn-sm" onclick="if(confirm('Limpar todos os itens marcados?')){pedido.sel={};pdLista()}">Limpar marcados</button>
+      </div>
+    </div>
+    <div class="card" id="pd_l"><p class="muted">Carregando…</p></div>
+    <div class="card">
+      <h3 style="margin-top:0">Itens avulsos <small class="muted" style="font-weight:400;text-transform:none">(o que não está cadastrado)</small></h3>
+      <div id="pd_av"></div>
+      <button class="btn btn-sm" onclick="pedido.avulsos.push({desc:'',qtd:1,obs:''});pdAvulsos();setTimeout(()=>$('#pd_avd'+(pedido.avulsos.length-1))?.focus(),30)">+ Adicionar item avulso</button>
+    </div>
+    <div class="card">
+      <div class="grid2">
+        <label>Para (fornecedor / distribuidor)<input value="${esc(pedido.forn)}" list="dl_pdforn" placeholder="Ex.: Distribuidora XPTO" oninput="pedido.forn=this.value"><datalist id="dl_pdforn"></datalist></label>
+        <label>Observação<input value="${esc(pedido.obs)}" placeholder="Ex.: favor informar disponibilidade e prazo de entrega" oninput="pedido.obs=this.value"></label>
+      </div>
+      <label class="chk" style="margin-top:8px"><input type="checkbox" ${pedido.custo ? 'checked' : ''} onchange="pedido.custo=this.checked"> Mostrar no PDF o último preço que paguei (custo de compra, sem imposto)</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px">
+        <b id="pd_tot" style="margin-right:auto"></b>
+        <button class="btn" onclick="pdTexto()">📋 Copiar texto (WhatsApp)</button>
+        <button class="btn btn-primary" onclick="pdPDF()">📄 Gerar PDF do pedido</button>
+      </div>
+    </div>`;
+  pdAvulsos();
+  sb.from('notas').select('fornecedor').order('id', { ascending: false }).limit(300).then(({ data }) => { const dl = $('#dl_pdforn'); if (dl && data) dl.innerHTML = [...new Set(data.map((x) => x.fornecedor).filter(Boolean))].map((f) => `<option value="${esc(f)}">`).join(''); });
+  await pdSaidas();
+}
+function pdCat(c) { pedido.cats.has(c) ? pedido.cats.delete(c) : pedido.cats.add(c); telaRelatorios(); }
+async function pdSaidas() {
+  pedido.saiu = new Map();
+  try {
+    const its = await fetchAll(() => sb.from('venda_itens').select('produto_id,quantidade,vendas!inner(data,status)').not('produto_id', 'is', null).eq('vendas.status', 'concluida').gte('vendas.data', inicioDia(relFil.ini).toISOString()).lt('vendas.data', isoMais1(relFil.fim)));
+    its.forEach((i) => pedido.saiu.set(i.produto_id, (pedido.saiu.get(i.produto_id) || 0) + i.quantidade));
+  } catch (e) { }
+  pdLista();
+}
+const pdBaixo = (p) => p.estoque <= 0 || (p.estoque_minimo > 0 && p.estoque <= p.estoque_minimo);
+function pdVisiveis() {
+  const ws = norm(pedido.busca).split(/\s+/).filter(Boolean);
+  return produtos.filter((p) => p.ativo
+    && (!pedido.cats.size || pedido.cats.has(p.categoria || 'Sem categoria'))
+    && (!pedido.soBaixo || pdBaixo(p))
+    && (!pedido.soSel || pedido.sel[p.id])
+    && ws.every((w) => norm(`${p.nome} ${p.codigo || ''} ${p.marca || ''} ${p.categoria || ''}`).includes(w)))
+    .sort((a, b) => (a.categoria || '').localeCompare(b.categoria || '') || a.nome.localeCompare(b.nome));
+}
+function pdLista() {
+  const el = $('#pd_l'); if (!el) return;
+  const l = pdVisiveis();
+  el.innerHTML = l.length ? `<table class="tbl"><thead><tr><th style="width:34px"></th><th>Produto</th><th>Categoria</th><th class="num">Estoque</th><th class="num">Mínimo</th><th class="num">Saiu</th><th class="num" style="width:110px">Pedir</th></tr></thead><tbody>
+    ${l.map((p) => { const q = pedido.sel[p.id]; return `<tr${q ? ' style="background:#eef6ff"' : ''}>
+      <td><input type="checkbox" id="pdc_${p.id}" ${q ? 'checked' : ''} onchange="pdMarca(${p.id},this.checked)"></td>
+      <td class="pn">${esc(p.nome)}${p.codigo || p.marca ? `<div class="sub">${esc([p.marca, p.codigo ? 'cód. ' + p.codigo : ''].filter(Boolean).join(' · '))}</div>` : ''}</td>
+      <td data-l="Categoria">${esc(p.categoria || '—')}</td>
+      <td class="num" data-l="Estoque"><span class="tag ${p.estoque <= 0 ? 'bad' : pdBaixo(p) ? 'warn' : 'ok'}">${p.estoque}</span></td>
+      <td class="num" data-l="Mínimo">${p.estoque_minimo || '—'}</td>
+      <td class="num" data-l="Saiu">${pedido.saiu.get(p.id) || '—'}</td>
+      <td class="num" data-l="Pedir"><input id="pdq_${p.id}" type="number" min="0" style="width:90px;text-align:right" value="${q || ''}" placeholder="0" oninput="pdQtd(${p.id},this.value)"></td></tr>`; }).join('')}
+    </tbody></table>` : '<p class="muted">Nenhum produto com esses filtros.</p>';
+  pdTotal();
+}
+function pdMarca(id, on) {
+  if (on) pedido.sel[id] = pedido.sel[id] || Math.max(1, (prod(id).estoque_minimo || 0) - prod(id).estoque, 1);
+  else delete pedido.sel[id];
+  const q = $('#pdq_' + id); if (q) q.value = pedido.sel[id] || '';
+  q?.closest('tr')?.style.setProperty('background', on ? '#eef6ff' : '');
+  pdTotal();
+}
+function pdQtd(id, v) {
+  const n = parseInt(v) || 0;
+  if (n > 0) pedido.sel[id] = n; else delete pedido.sel[id];
+  const c = $('#pdc_' + id); if (c) c.checked = n > 0;
+  c?.closest('tr')?.style.setProperty('background', n > 0 ? '#eef6ff' : '');
+  pdTotal();
+}
+function pdSugerir() {
+  let n = 0;
+  pdVisiveis().forEach((p) => { const s = pedido.saiu.get(p.id); if (s > 0) { pedido.sel[p.id] = s; n++; } });
+  pdLista(); toast(n ? `${n} produto(s) marcados com a quantidade que saiu no período` : 'Nenhum produto da lista teve saída no período');
+}
+function pdAvulsos() {
+  const el = $('#pd_av'); if (!el) return;
+  el.innerHTML = pedido.avulsos.map((a, i) => `<div style="display:grid;grid-template-columns:1fr 90px 1fr 34px;gap:6px;margin-bottom:6px">
+      <input id="pd_avd${i}" placeholder="Descrição do produto" value="${esc(a.desc)}" oninput="pedido.avulsos[${i}].desc=this.value;pdTotal()">
+      <input type="number" min="1" placeholder="Qtd" value="${a.qtd || ''}" oninput="pedido.avulsos[${i}].qtd=parseInt(this.value)||0;pdTotal()">
+      <input placeholder="Obs. (marca, cor, modelo…)" value="${esc(a.obs)}" oninput="pedido.avulsos[${i}].obs=this.value">
+      <button class="xbtn" title="Remover" onclick="pedido.avulsos.splice(${i},1);pdAvulsos();pdTotal()">×</button></div>`).join('') || '<p class="muted" style="margin:0 0 8px">Nenhum item avulso.</p>';
+}
+function pdItens() {
+  const cad = Object.entries(pedido.sel).map(([id, q]) => ({ p: prod(+id), q })).filter((x) => x.p && x.q > 0)
+    .sort((a, b) => (a.p.categoria || '').localeCompare(b.p.categoria || '') || a.p.nome.localeCompare(b.p.nome))
+    .map((x) => ({ cod: x.p.codigo || '', desc: x.p.nome + (x.p.marca && !norm(x.p.nome).includes(norm(x.p.marca)) ? ` (${x.p.marca})` : ''), un: x.p.unidade || 'un', q: x.q, custo: x.p.c?.preco_compra }));
+  const av = pedido.avulsos.filter((a) => a.desc.trim() && a.qtd > 0).map((a) => ({ cod: '', desc: a.desc.trim() + (a.obs.trim() ? ` — ${a.obs.trim()}` : ''), un: 'un', q: a.qtd, avulso: true }));
+  return [...cad, ...av];
+}
+function pdTotal() {
+  const it = pdItens(), el = $('#pd_tot');
+  if (el) el.textContent = it.length ? `${it.length} item(ns) no pedido · ${it.reduce((s, x) => s + x.q, 0)} unidade(s)` : 'Nenhum item marcado ainda';
+}
+function pdTexto() {
+  const it = pdItens(); if (!it.length) return toast('Marque pelo menos um produto', 'erro');
+  const t = `*PEDIDO DE COMPRA — ${cfg.razao || 'BETO INFORMÁTICA'}*\nData: ${dataBR(hojeISO())}${pedido.forn.trim() ? `\nPara: ${pedido.forn.trim()}` : ''}\n\n`
+    + it.map((x, i) => `${i + 1}) *${x.q} ${x.un}* — ${x.desc}${x.cod ? ` (cód. ${x.cod})` : ''}`).join('\n')
+    + `\n\nTotal: ${it.length} item(ns)${pedido.obs.trim() ? `\nObs.: ${pedido.obs.trim()}` : ''}\nPor favor, confirmar disponibilidade em estoque e valores. Obrigado!`;
+  const ok = () => toast('Texto copiado ✔ É só colar no WhatsApp');
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(ok, () => prompt('Copie o texto:', t));
+  else prompt('Copie o texto:', t);
+}
+function pdPDF() {
+  const it = pdItens(); if (!it.length) return toast('Marque pelo menos um produto', 'erro');
+  if (!window.jspdf) return toast('Não foi possível carregar o gerador de PDF. Verifique a internet e recarregue.', 'erro');
+  const doc = new window.jspdf.jsPDF({ unit: 'mm', format: 'a4' });
+  const L = 15, Rx = 195, mostraCusto = pedido.custo;
+  const cols = mostraCusto ? [[L, 'Nº', 9], [L + 9, 'Código', 24], [L + 33, 'Produto', 102], [L + 135, 'Un', 11], [L + 146, 'Qtd', 14], [L + 160, 'Últ. preço', 20]]
+    : [[L, 'Nº', 9], [L + 9, 'Código', 26], [L + 35, 'Produto', 120], [L + 155, 'Un', 11], [L + 166, 'Qtd', 14]];
+  const rodape = () => {
+    doc.setDrawColor(150, 150, 150); doc.setLineWidth(0.3); doc.line(L, 282, Rx, 282);
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(80, 80, 80);
+    doc.text(`${cfg.razao || ''} - CNPJ: ${cfg.cnpj || ''} - Fone: ${cfg.fone || ''}`, 105, 287, { align: 'center' });
+    if (cfg.endereco) doc.text(cfg.endereco, 105, 291, { align: 'center' });
+  };
+  const cabTabela = (y) => {
+    doc.setFillColor(26, 111, 224); doc.rect(L, y - 5, Rx - L, 7.5, 'F');
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(9.5); doc.setTextColor(255, 255, 255);
+    cols.forEach(([x, t, w], k) => doc.text(t, k >= cols.length - (mostraCusto ? 3 : 2) && t !== 'Un' ? x + w - 2 : x + 2, y, { align: k >= cols.length - (mostraCusto ? 3 : 2) && t !== 'Un' ? 'right' : 'left' }));
+    return y + 7;
+  };
+  try { doc.addImage(LOGO, 'JPEG', L, 12, 55, 22); } catch (e) { }
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(17); doc.setTextColor(40, 40, 40);
+  doc.text('PEDIDO DE COMPRA', Rx, 20, { align: 'right' });
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(10.5); doc.setTextColor(70, 70, 70);
+  doc.text(`Data: ${dataBR(hojeISO())}`, Rx, 27, { align: 'right' });
+  doc.text(`${it.length} item(ns) · ${it.reduce((s, x) => s + x.q, 0)} unidade(s)`, Rx, 33, { align: 'right' });
+  doc.setDrawColor(170, 170, 170); doc.setLineWidth(0.4); doc.line(L, 39, Rx, 39);
+  let y = 46;
+  doc.setFontSize(10.5); doc.setTextColor(30, 30, 30);
+  doc.setFont('helvetica', 'bold'); doc.text('De:', L, y); doc.setFont('helvetica', 'normal');
+  doc.text(`${cfg.razao || cfg.empresa || 'Beto Informática'}${cfg.cnpj ? ' - CNPJ ' + cfg.cnpj : ''}${cfg.fone ? ' - Fone ' + cfg.fone : ''}`, L + 12, y);
+  if (pedido.forn.trim()) { y += 6; doc.setFont('helvetica', 'bold'); doc.text('Para:', L, y); doc.setFont('helvetica', 'normal'); doc.text(pedido.forn.trim(), L + 12, y); }
+  y += 6; doc.setFontSize(9.5); doc.setTextColor(90, 90, 90);
+  doc.text('Solicitamos verificar a disponibilidade em estoque e informar os valores dos itens abaixo:', L, y);
+  y = cabTabela(y + 9);
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5);
+  it.forEach((x, i) => {
+    const wProd = cols[2][2] - 3, linhas = doc.splitTextToSize(x.desc, wProd), h = Math.max(6.5, linhas.length * 4.4 + 2.2);
+    if (y + h > 272) { rodape(); doc.addPage(); y = cabTabela(20); doc.setFont('helvetica', 'normal'); doc.setFontSize(9.5); }
+    if (i % 2) { doc.setFillColor(243, 246, 251); doc.rect(L, y - 4.6, Rx - L, h, 'F'); }
+    doc.setTextColor(30, 30, 30);
+    doc.text(String(i + 1), cols[0][0] + 2, y);
+    doc.text(x.avulso ? '—' : String(x.cod || '—').slice(0, 14), cols[1][0] + 2, y);
+    doc.text(linhas, cols[2][0] + 2, y);
+    doc.text(x.un, cols[3][0] + 2, y);
+    doc.setFont('helvetica', 'bold'); doc.text(String(x.q), cols[4][0] + cols[4][2] - 2, y, { align: 'right' }); doc.setFont('helvetica', 'normal');
+    if (mostraCusto) doc.text(x.custo ? brl(x.custo) : '—', cols[5][0] + cols[5][2] - 2, y, { align: 'right' });
+    y += h;
+  });
+  doc.setDrawColor(200, 200, 200); doc.line(L, y - 3, Rx, y - 3);
+  y += 4;
+  if (pedido.obs.trim()) {
+    if (y > 260) { rodape(); doc.addPage(); y = 20; }
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(10); doc.text('Observação:', L, y); doc.setFont('helvetica', 'normal');
+    const ob = doc.splitTextToSize(pedido.obs.trim(), Rx - L - 25); doc.text(ob, L + 25, y); y += ob.length * 5 + 3;
+  }
+  doc.setFontSize(9.5); doc.setTextColor(90, 90, 90);
+  doc.text(`${cfg.cidade || ''}${cfg.cidade ? ', ' : ''}${dataExtenso(hojeISO())}.`, L, y + 4);
+  const total = doc.getNumberOfPages();
+  for (let k = 1; k <= total; k++) { doc.setPage(k); rodape(); if (total > 1) { doc.setFontSize(8); doc.text(`Página ${k} de ${total}`, Rx, 287, { align: 'right' }); } }
+  const nome = `pedido-compra-${hojeISO()}.pdf`;
+  const w = window.open(doc.output('bloburl'), '_blank'); if (!w) doc.save(nome);
+}
+
 async function gerarRel() {
   const el = $('#rel_body'); if (!el) return;
   el.innerHTML = '<p class="muted">Gerando…</p>';
