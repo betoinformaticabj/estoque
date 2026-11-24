@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<!-- versão 2026-11-12b -->
+<!-- versão 2026-11-24b -->
 <title>Estoque · Beto Informática</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -521,7 +521,7 @@ async function telaPainel() {
     ]);
     const s = (a) => a.reduce((t, v) => t + Number(v.total), 0);
     $('#k_hoje').textContent = brl(s(vh)); $('#k_mes').textContent = brl(s(vm));
-    $('#p_ult').innerHTML = ult.data?.length ? `<table class="tbl"><tbody>${ult.data.map((v) => `<tr class="click ${v.status === 'cancelada' ? 'cancel' : ''}" onclick="verVenda(${v.id})"><td><span class="pn">${esc(v.cliente_nome)}</span>${v.tipo === 'saida' ? ' <span class="tag warn">SAÍDA</span>' : ''}<div class="sub">#${v.id} · ${dataHoraBR(v.data)}</div></td><td class="num" data-l="Total">${v.tipo === 'saida' ? '—' : brl(v.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nenhuma venda ainda.</p>';
+    $('#p_ult').innerHTML = ult.data?.length ? `<table class="tbl"><tbody>${ult.data.map((v) => `<tr class="click ${v.status === 'cancelada' ? 'cancel' : ''}" onclick="verVenda(${v.id})"><td><span class="pn">${esc(v.cliente_nome)}</span>${v.tipo === 'saida' ? ' <span class="tag warn">SAÍDA</span>' : ''}${v.nf_modelo ? ` <span class="tag blue">${esc(v.nf_modelo)} ${esc(v.nf_numero || '')}</span>` : ''}<div class="sub">#${v.id} · ${dataHoraBR(v.data)}</div></td><td class="num" data-l="Total">${v.tipo === 'saida' ? '—' : brl(v.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nenhuma venda ainda.</p>';
     if (isAdmin) {
       const { data, error } = await sb.rpc('resumo_vendas', { p_inicio: mes.toISOString(), p_fim: amanha.toISOString() });
       if (error) throw error;
@@ -1407,6 +1407,347 @@ async function finalizarVenda() {
   verVenda(data.id, true);
 }
 
+/* ====================== IMPORTAR VENDA PELO XML ====================== */
+const TPAG = { '01': 'Dinheiro', '02': 'Cheque', '03': 'Cartão de crédito', '04': 'Cartão de débito', '05': 'Cartão de crédito', '10': 'Vale', '11': 'Vale', '12': 'Vale', '13': 'Vale', '15': 'Boleto', '16': 'Transferência', '17': 'Pix', '18': 'Transferência', '19': 'Pix', '20': 'Pix', '90': '', '99': '' };
+const soDig = (x) => String(x || '').replace(/\D/g, '');
+const xEl = (el, t) => (el ? el.getElementsByTagNameNS('*', t)[0] || el.getElementsByTagName(t)[0] || null : null);
+const xAll = (el, t) => (el ? [...el.getElementsByTagNameNS('*', t)] : []);
+const xT = (el, t) => xEl(el, t)?.textContent?.trim() || '';
+const xN = (el, t) => parseFloat(xT(el, t).replace(',', '.')) || 0;
+function lerXmlVenda(txt, arq) {
+  const d = new DOMParser().parseFromString(txt, 'text/xml');
+  if (d.getElementsByTagName('parsererror').length) throw new Error('arquivo XML inválido');
+  const meuDoc = soDig(cfg?.cnpj);
+  const r = { arq, itens: [], pags: [], dups: [], cliente: null, avisos: [] };
+  const end = (e) => [xT(e, 'xLgr') || xT(e, 'Endereco'), xT(e, 'nro') || xT(e, 'Numero'), xT(e, 'xBairro') || xT(e, 'Bairro')].filter(Boolean).join(', ');
+  let inf = xEl(d, 'infNFe');
+  if (inf) { // ---------- NF-e / NFC-e
+    const ide = xEl(inf, 'ide'), emit = xEl(inf, 'emit'), dest = xEl(inf, 'dest'), tot = xEl(inf, 'ICMSTot');
+    r.modelo = xT(ide, 'mod') === '65' ? 'NFC-e' : 'NF-e';
+    r.chave = (inf.getAttribute('Id') || '').replace(/^NFe/, '') || null;
+    r.numero = xT(ide, 'nNF'); r.data = xT(ide, 'dhEmi') || xT(ide, 'dEmi');
+    const emDoc = soDig(xT(emit, 'CNPJ') || xT(emit, 'CPF'));
+    if (meuDoc && emDoc && emDoc !== meuDoc) throw new Error(`esta nota foi emitida por outra empresa (${xT(emit, 'xNome')}). Nota de compra se lança na aba Entrada.`);
+    if (xT(ide, 'tpNF') === '0') throw new Error('esta é uma nota de ENTRADA (ex.: devolução), não é venda.');
+    if (xT(ide, 'finNFe') === '4') throw new Error('esta é uma nota de DEVOLUÇÃO, não é venda.');
+    r.total = xN(tot, 'vNF');
+    if (dest && xT(dest, 'xNome')) {
+      const ed = xEl(dest, 'enderDest');
+      r.cliente = { nome: xT(dest, 'xNome'), documento: soDig(xT(dest, 'CNPJ') || xT(dest, 'CPF')), endereco: end(ed), cidade: xT(ed, 'xMun'), uf: xT(ed, 'UF'), telefone: xT(ed, 'fone'), email: xT(dest, 'email') };
+    } else if (dest && (xT(dest, 'CPF') || xT(dest, 'CNPJ'))) r.avisos.push(`Cupom com CPF/CNPJ ${xT(dest, 'CPF') || xT(dest, 'CNPJ')}, mas sem nome do cliente.`);
+    xAll(inf, 'det').forEach((det) => {
+      const pp = xEl(det, 'prod');
+      const v = xN(pp, 'vProd') - xN(pp, 'vDesc') + xN(pp, 'vOutro') + xN(pp, 'vFrete') + xN(pp, 'vSeg');
+      const q = xN(pp, 'qCom');
+      r.itens.push({ tipo: 'produto', cProd: xT(pp, 'cProd'), cEAN: /^\d{8,14}$/.test(xT(pp, 'cEAN')) ? xT(pp, 'cEAN') : '', xProd: xT(pp, 'xProd'), qXml: q, qtd: Math.max(1, Math.round(q)), valor: r2(v) });
+    });
+    const troco = xN(xEl(inf, 'pag'), 'vTroco');
+    xAll(inf, 'detPag').forEach((dp) => r.pags.push({ t: xT(dp, 'tPag'), forma: TPAG[xT(dp, 'tPag')] ?? '', valor: xN(dp, 'vPag') }));
+    if (troco > 0) { const din = r.pags.find((x) => x.forma === 'Dinheiro') || r.pags[0]; if (din) din.valor = r2(din.valor - troco); }
+    xAll(inf, 'dup').forEach((du) => r.dups.push({ vencimento: xT(du, 'dVenc'), valor: xN(du, 'vDup') }));
+    return r;
+  }
+  inf = xEl(d, 'infNFSe');
+  if (inf) { // ---------- NFS-e padrão nacional
+    const dps = xEl(inf, 'infDPS') || inf, toma = xEl(dps, 'toma'), serv = xEl(dps, 'serv'), val = xEl(dps, 'valores'), prest = xEl(dps, 'prest');
+    r.modelo = 'NFS-e';
+    r.chave = (inf.getAttribute('Id') || '').replace(/^NFS/, '') || null;
+    r.numero = xT(inf, 'nNFSe'); r.data = xT(dps, 'dhEmi') || xT(inf, 'dhProc');
+    const prDoc = soDig(xT(prest, 'CNPJ') || xT(prest, 'CPF') || xT(xEl(inf, 'emit'), 'CNPJ'));
+    if (meuDoc && prDoc && prDoc !== meuDoc) throw new Error('esta nota de serviço foi emitida por outra empresa.');
+    if (toma && xT(toma, 'xNome')) {
+      const e = xEl(toma, 'end');
+      // a NFS-e nacional traz só o código IBGE da cidade do cliente: usa o nome quando é a mesma cidade da nota
+      const mun = { [xT(inf, 'cLocIncid')]: xT(inf, 'xLocIncid'), [xT(xEl(xEl(inf, 'emit'), 'enderNac'), 'cMun')]: xT(inf, 'xLocEmi') };
+      const cMun = xT(xEl(e, 'endNac'), 'cMun'), ufEmit = xT(xEl(xEl(inf, 'emit'), 'enderNac'), 'UF');
+      const cid = xT(e, 'xMun') || (cMun && mun[cMun]) || '';
+      r.cliente = { nome: xT(toma, 'xNome'), documento: soDig(xT(toma, 'CNPJ') || xT(toma, 'CPF')), endereco: end(e), cidade: cid, uf: xT(e, 'UF') || (cid && cMun.slice(0, 2) === soDig(xT(inf, 'cLocIncid')).slice(0, 2) ? ufEmit : ''), telefone: xT(toma, 'fone'), email: xT(toma, 'email') };
+    }
+    // forma de pagamento escrita nas informações complementares (ex.: "PIX CNPJ ...")
+    const inf2 = norm(xT(serv, 'xInfComp') + ' ' + xT(dps, 'xInfComp'));
+    const fp = /\bpix\b/.test(inf2) ? 'Pix' : /dinheiro|especie/.test(inf2) ? 'Dinheiro' : /debito/.test(inf2) ? 'Cartão de débito' : /credito|cartao/.test(inf2) ? 'Cartão de crédito' : /boleto/.test(inf2) ? 'Boleto' : /transfer|ted\b|deposito/.test(inf2) ? 'Transferência' : '';
+    const vServ = xN(xEl(val, 'vServPrest'), 'vServ') || xN(val, 'vServ') || xN(xEl(inf, 'valores'), 'vLiq');
+    const desc = xN(xEl(val, 'vDescCondIncond'), 'vDescIncond');
+    r.total = r2(vServ - desc);
+    r.itens.push({ tipo: 'servico', xProd: xT(xEl(serv, 'cServ'), 'xDescServ') || xT(serv, 'xDescServ') || 'Serviço', cod: xT(xEl(serv, 'cServ'), 'cTribNac'), qXml: 1, qtd: 1, valor: r.total });
+    if (fp) r.pags.push({ t: '', forma: fp, valor: r.total });
+    return r;
+  }
+  inf = xEl(d, 'InfNfse');
+  if (inf) { // ---------- NFS-e municipal (padrão ABRASF)
+    const sv = xEl(inf, 'Servico') || xEl(d, 'Servico'), vals = xEl(sv, 'Valores');
+    const tom = xEl(inf, 'TomadorServico') || xEl(d, 'Tomador') || xEl(d, 'TomadorServico');
+    const prest = xEl(inf, 'PrestadorServico') || xEl(d, 'Prestador');
+    const prDoc = soDig(xT(prest, 'Cnpj') || xT(prest, 'Cpf'));
+    if (meuDoc && prDoc && prDoc !== meuDoc) throw new Error('esta nota de serviço foi emitida por outra empresa.');
+    r.modelo = 'NFS-e';
+    r.numero = xT(inf, 'Numero');
+    r.chave = 'NFSE-' + (prDoc || meuDoc || '') + '-' + r.numero + (xT(inf, 'CodigoVerificacao') ? '-' + xT(inf, 'CodigoVerificacao') : '');
+    r.data = xT(inf, 'DataEmissao') || xT(d, 'DataEmissao');
+    if (tom && xT(tom, 'RazaoSocial')) {
+      const e = xEl(tom, 'Endereco');
+      r.cliente = { nome: xT(tom, 'RazaoSocial'), documento: soDig(xT(tom, 'Cnpj') || xT(tom, 'Cpf')), endereco: end(e), cidade: '', uf: xT(e, 'Uf'), telefone: xT(tom, 'Telefone'), email: xT(tom, 'Email') };
+    }
+    r.total = r2(xN(vals, 'ValorServicos') - xN(vals, 'DescontoIncondicionado') - xN(vals, 'ValorDescontoIncondicionado'));
+    r.itens.push({ tipo: 'servico', xProd: xT(sv, 'Discriminacao') || 'Serviço', cod: xT(sv, 'ItemListaServico'), qXml: 1, qtd: 1, valor: r.total });
+    return r;
+  }
+  throw new Error('não é XML de NF-e, cupom (NFC-e) nem nota de serviço (NFS-e)');
+}
+// semelhança de nomes de clientes (aceita abreviação: "João S." ~ "João da Silva")
+const STOP_CLI = new Set(['da', 'de', 'do', 'das', 'dos', 'e', 'ltda', 'me', 'epp', 'eireli', 'sa']);
+const tokCli = (s) => norm(s).replace(/[^a-z0-9]+/g, ' ').split(' ').filter((w) => w && !STOP_CLI.has(w));
+function simCliente(a, b) {
+  const A = tokCli(a), B = tokCli(b);
+  if (!A.length || !B.length) return 0;
+  if (A.join(' ') === B.join(' ')) return 1;
+  const [C, L] = A.length <= B.length ? [A, B] : [B, A];
+  const usado = new Set(); let m = 0;
+  C.forEach((x) => {
+    const j = L.findIndex((y, k) => !usado.has(k) && (y === x || (x.length <= 3 && y.startsWith(x)) || (y.length <= 3 && x.startsWith(y)) || (x.length >= 4 && y.length >= 4 && (x.startsWith(y) || y.startsWith(x)))));
+    if (j >= 0) { usado.add(j); m += (L[j] === x ? 1 : 0.8); }
+  });
+  let sc = (2 * m) / (A.length + B.length);
+  if (m > 0 && C.length >= 2 && m / C.length >= 0.99) sc = Math.max(sc, 0.75); // todos os nomes do mais curto aparecem no mais longo
+  const bate = (x, y) => x === y || (x.length <= 3 && y.startsWith(x)) || (y.length <= 3 && x.startsWith(y)) || (x.length >= 4 && y.length >= 4 && (x.startsWith(y) || y.startsWith(x)));
+  if (!L.some((y) => bate(C[0], y))) sc *= 0.6; // o primeiro nome do mais curto não aparece no outro
+  return Math.min(0.99, sc);
+}
+let ix = null;
+async function importarVendasXML(files) {
+  files = [...(files || [])]; if (!files.length) return;
+  const lidas = [], erros = [];
+  for (const f of files) {
+    try { lidas.push(lerXmlVenda(await f.text(), f.name)); } catch (e) { erros.push(`${f.name}: ${e.message}`); }
+  }
+  if (!lidas.length) return alert('Nenhum XML pôde ser importado:\n\n' + erros.join('\n'));
+  try {
+    const [vinc, comp, jaImp] = await Promise.all([
+      fetchAll(() => sb.from('xml_vinculos').select('*')),
+      fetchAll(() => sb.from('vendas').select('cliente_id,data').eq('status', 'concluida').not('cliente_id', 'is', null)),
+      sb.from('vendas').select('id,nf_chave').eq('status', 'concluida').in('nf_chave', lidas.map((x) => x.chave).filter(Boolean)),
+    ]);
+    if (!servicos.length) await carregarServicos();
+    const stat = new Map();
+    comp.forEach((v) => { const o = stat.get(v.cliente_id) || { n: 0, ult: '' }; o.n++; if (v.data > o.ult) o.ult = v.data; stat.set(v.cliente_id, o); });
+    const dup = new Map((jaImp.data || []).map((v) => [v.nf_chave, v.id]));
+    ix = { fila: lidas.map((r) => prepImport(r, vinc, dup)), i: 0, feitos: [], erros, stat, vinc };
+    ix.fila.sort((a, b) => String(a.data).localeCompare(String(b.data)));
+    telaImport();
+  } catch (e) { erro(e); }
+}
+function prepImport(r, vinc, dup) {
+  const vP = new Map(vinc.filter((x) => x.tipo === 'produto').map((x) => [x.chave, x.alvo_id]));
+  const vS = new Map(vinc.filter((x) => x.tipo === 'servico').map((x) => [x.chave, x.alvo_id]));
+  if (dup) r.dupId = r.chave ? dup.get(r.chave) || null : null;
+  // cliente
+  const c = r.cliente;
+  r.cli = { modo: 'consumidor', id: null, sugs: [], nomeNota: false };
+  if (c) {
+    const porDoc = c.documento ? clientes.find((x) => soDig(x.documento) === c.documento) : null;
+    if (porDoc) r.cli = { modo: 'existente', id: porDoc.id, auto: true, sugs: [], nomeNota: false };
+    else {
+      const sugs = clientes.map((x) => ({ c: x, sc: simCliente(c.nome, x.nome) })).filter((x) => x.sc >= 0.5).sort((a, b) => b.sc - a.sc).slice(0, 4);
+      r.cli = { modo: sugs.length ? null : 'novo', id: null, sugs, nomeNota: false };
+    }
+  }
+  // itens
+  r.itens.forEach((it) => {
+    if (it.tipo === 'produto') {
+      let pid = vP.get(it.cProd) || produtos.find((p) => p.codigo && (p.codigo.trim() === it.cEAN || p.codigo.trim() === it.cProd))?.id || produtos.find((p) => norm(p.nome) === norm(it.xProd))?.id || null;
+      if (pid && !prod(pid)) pid = null;
+      it.pid = pid; it.auto = !!pid;
+      it.sugs = produtos.filter((p) => p.ativo).map((p) => ({ p, sc: simNome(it.xProd, p.nome) })).filter((x) => x.sc >= 0.45).sort((a, b) => b.sc - a.sc).slice(0, 3);
+      it.sugerido = false;
+      if (!pid && it.sugs[0]?.sc >= 0.9 && !(it.sugs[1]?.sc >= 0.9)) { it.pid = it.sugs[0].p.id; it.sugerido = true; } // muito parecido: já deixa escolhido para conferir
+    } else {
+      it.chaveS = norm(it.xProd).slice(0, 120);
+      let sid = vS.get(it.chaveS) || null;
+      if (sid && !serv(sid)) sid = null;
+      it.sid = sid; it.auto = !!sid;
+      it.sugs = servicos.filter((x) => x.ativo).map((x) => ({ s: x, sc: simNome(it.xProd, x.nome) })).filter((x) => x.sc >= 0.4).sort((a, b) => b.sc - a.sc).slice(0, 3);
+      if (!sid && it.sugs[0]?.sc >= 0.8) it.sid = it.sugs[0].s.id;
+      it.desc = it.xProd;
+    }
+    it.preco = r2(it.valor / it.qtd);
+  });
+  r.baixar = r.modelo === 'NFC-e' ? null : true;
+  // pagamento
+  r.dataCx = dataLocalISO(r.data);
+  const prazo = r.pags.some((x) => ['15', '90'].includes(x.t));
+  if (r.dups.length) { r.pg = 'prazo'; r.parc = r.dups.map((x) => ({ ...x })); }
+  else if (prazo) { r.pg = 'prazo'; r.parc = [{ vencimento: maisDiasDe(r.dataCx, 30), valor: r.total }]; }
+  else {
+    r.pg = 'caixa';
+    const ps = r.pags.filter((x) => x.valor > 0);
+    r.pgs = (ps.length ? ps : [{ forma: '', valor: r.total }]).map((x) => ({ forma: FORMAS.includes(x.forma) ? x.forma : '', valor: r2(x.valor), banco: bancoParaForma(x.forma) }));
+    r.parc = [{ vencimento: maisDiasDe(r.dataCx, 30), valor: r.total }];
+  }
+  if (!r.pgs) r.pgs = [{ forma: '', valor: r.total, banco: bancoPadrao() }];
+  return r;
+}
+const dataLocalISO = (d) => { const x = d ? new Date(d.length === 10 ? d + 'T12:00:00' : d) : new Date(); return isNaN(x) ? hojeISO() : x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
+const maisDiasDe = (iso, n) => { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return dataLocalISO(d.toISOString()); };
+const ixTotal = (r) => r2(r.itens.reduce((s, it) => s + it.qtd * it.preco, 0));
+function telaImport() {
+  const r = ix.fila[ix.i];
+  if (!r) return fimImport();
+  const T = ixTotal(r), sel = (v, x) => (v === x ? 'selected' : '');
+  const st = ix.stat;
+  const cliInfo = (c) => { const o = st.get(c.id); return [c.documento, c.telefone ? '📞 ' + c.telefone : '', c.cidade, o ? `${o.n} compra(s), última ${dataBR(o.ult.slice(0, 10))}` : 'sem compras'].filter(Boolean).join(' · '); };
+  const c = r.cliente;
+  const cliHtml = !c ? `<p>${r.modelo === 'NFC-e' ? 'Cupom sem identificação do cliente.' : 'Nota sem cliente identificado.'} A venda entra como <b>Consumidor</b>.</p>`
+    : `<div style="background:#f7f9fc;border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin-bottom:8px"><small class="muted">Cliente na nota</small><div><b>${esc(c.nome)}</b></div><div class="muted" style="font-size:12px">${esc([c.documento && (c.documento.length === 14 ? 'CNPJ ' : 'CPF ') + c.documento, c.endereco, [c.cidade, c.uf].filter(Boolean).join('/'), c.telefone].filter(Boolean).join(' · '))}</div></div>
+      ${r.cli.auto ? `<div class="alert ok" style="margin:0">✔ Cliente reconhecido pelo CPF/CNPJ: <b>${esc(cli(r.cli.id)?.nome)}</b></div>` : `
+        ${r.cli.sugs.length ? `<div class="alert warn" style="margin:0 0 8px"><b>⚠ Este cliente já está cadastrado?</b> Achei nomes parecidos. Se for o mesmo, marque — o cadastro dele ganha o CPF/CNPJ e o endereço da nota e o histórico fica junto.</div>` : ''}
+        ${r.cli.sugs.map((x) => `<label class="chk" style="border:1px solid var(--line);border-radius:9px;padding:8px;margin-bottom:6px;align-items:flex-start"><input type="radio" name="ix_cli" ${r.cli.modo === 'existente' && r.cli.id === x.c.id ? 'checked' : ''} onchange="ixCli('existente',${x.c.id})">
+          <span><b>É este: ${esc(x.c.nome)}</b> <span class="tag ${x.sc >= 0.8 ? 'ok' : ''}">${Math.round(x.sc * 100)}% parecido</span><br><small class="muted">${esc(cliInfo(x.c))}</small></span></label>`).join('')}
+        <label class="chk" style="margin:4px 0"><input type="radio" name="ix_cli" ${r.cli.modo === 'existente' && !r.cli.sugs.some((x) => x.c.id === r.cli.id) ? 'checked' : ''} onchange="ixCli('existente',+$('#ix_outro').value||null)"> <span>Outro cliente já cadastrado:</span></label>
+        <select id="ix_outro" style="margin:0 0 6px 26px;max-width:calc(100% - 26px)" onchange="ixCli('existente',+this.value||null)"><option value="">— escolher —</option>${clientes.filter((x) => x.ativo !== false).sort((a, b) => a.nome.localeCompare(b.nome)).map((x) => `<option value="${x.id}" ${r.cli.modo === 'existente' && r.cli.id === x.id ? 'selected' : ''}>${esc(x.nome)}</option>`).join('')}</select>
+        <label class="chk" style="margin:4px 0"><input type="radio" name="ix_cli" ${r.cli.modo === 'novo' ? 'checked' : ''} onchange="ixCli('novo')"> <span><b>É cliente novo</b> — cadastrar com os dados da nota</span></label>
+        <label class="chk" style="margin:4px 0"><input type="radio" name="ix_cli" ${r.cli.modo === 'consumidor' ? 'checked' : ''} onchange="ixCli('consumidor')"> <span>Lançar como Consumidor (sem cliente)</span></label>
+        ${r.cli.modo === 'existente' && r.cli.id ? `<div style="margin:6px 0 0 26px;font-size:13px">Nome no cadastro:
+          <label class="chk" style="display:inline-flex;margin-left:8px"><input type="radio" name="ix_nm" ${r.cli.nomeNota ? '' : 'checked'} onchange="ix.fila[ix.i].cli.nomeNota=false"> manter "${esc(cli(r.cli.id)?.nome)}"</label>
+          <label class="chk" style="display:inline-flex;margin-left:8px"><input type="radio" name="ix_nm" ${r.cli.nomeNota ? 'checked' : ''} onchange="ix.fila[ix.i].cli.nomeNota=true"> usar "${esc(c.nome)}"</label></div>` : ''}`}`;
+  const itHtml = r.itens.map((it, k) => {
+    const valor = `<div class="muted" style="font-size:12px">Qtd ${it.qXml !== it.qtd ? `<b style="color:var(--bad)">${it.qXml} → ${it.qtd}</b>` : it.qtd} × ${brl(it.preco)} = <b>${brl(it.qtd * it.preco)}</b></div>`;
+    if (it.tipo === 'servico') return `<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-bottom:8px">
+      <span class="tag blue">🔧 SERVIÇO</span> <b>${esc(it.xProd.length > 160 ? it.xProd.slice(0, 160) + '…' : it.xProd)}</b>${valor}
+      <div class="grid2" style="margin-top:6px">
+        <label>Serviço no cadastro${it.auto ? ' <span class="tag ok">✔ vinculado antes</span>' : ''}<select onchange="ixServ(${k},this.value)">
+          <option value="">Avulso (sem vínculo)</option>
+          ${it.sugs.length ? `<optgroup label="Parecidos">${it.sugs.map((x) => `<option value="${x.s.id}" ${sel(it.sid, x.s.id)}>${esc(x.s.nome)} (${Math.round(x.sc * 100)}%)</option>`).join('')}</optgroup>` : ''}
+          <optgroup label="Todos os serviços">${servicos.filter((x) => x.ativo).map((x) => `<option value="${x.id}" ${it.sugs.some((y) => y.s.id === x.id) ? '' : sel(it.sid, x.id)}>${esc(x.nome)}</option>`).join('')}</optgroup></select></label>
+        <label>Descrição na venda<input value="${esc(it.desc)}" oninput="ix.fila[ix.i].itens[${k}].desc=this.value"></label>
+      </div></div>`;
+    const p = it.pid ? prod(it.pid) : null;
+    const falta = p && r.baixar !== false && it.qtd > p.estoque;
+    return `<div style="border:1px solid ${it.pid ? 'var(--line)' : '#f0b44c'};border-radius:10px;padding:10px;margin-bottom:8px">
+      <b>${esc(it.xProd)}</b> <span class="muted" style="font-size:12px">cód. ${esc(it.cProd || '—')}${it.cEAN ? ' · EAN ' + esc(it.cEAN) : ''}</span>${valor}
+      ${it.qXml !== it.qtd ? `<div class="muted" style="font-size:12px;color:var(--bad)">A nota tem quantidade fracionada; no estoque entra ${it.qtd} un.</div>` : ''}
+      <label style="margin-top:6px">${it.pid ? (it.auto ? '<span class="tag ok">✔ Produto vinculado</span>' : it.sugerido ? '<span class="tag warn">Sugerido pelo nome — confira</span>' : '<span class="tag blue">Produto escolhido</span>') : '<span class="tag warn">⚠ Escolha o produto do seu estoque</span>'}
+        <select onchange="ixProd(${k},this.value)">
+          <option value="">— escolher produto —</option>
+          ${it.sugs.length ? `<optgroup label="Parecidos">${it.sugs.map((x) => `<option value="${x.p.id}" ${sel(it.pid, x.p.id)}>${esc(x.p.nome)} (${Math.round(x.sc * 100)}% · estoque ${x.p.estoque})</option>`).join('')}</optgroup>` : ''}
+          <optgroup label="Todos os produtos">${produtos.filter((x) => x.ativo || x.id === it.pid).sort((a, b) => a.nome.localeCompare(b.nome)).map((x) => `<option value="${x.id}" ${it.sugs.some((y) => y.p.id === x.id) ? '' : sel(it.pid, x.id)}>${esc(x.nome)} (estoque ${x.estoque})</option>`).join('')}</optgroup>
+        </select></label>
+      ${falta ? `<div style="font-size:12px;color:var(--bad);margin-top:4px">Atenção: no seu estoque tem ${p.estoque}; vai ficar ${p.estoque - it.qtd}.</div>` : ''}
+    </div>`;
+  }).join('');
+  const temProd = r.itens.some((it) => it.tipo === 'produto');
+  const pgHtml = `
+    <label class="chk"><input type="radio" name="ix_pg" ${r.pg === 'caixa' ? 'checked' : ''} onchange="ixPg('caixa')"> <span><b>À vista</b> — lançar no fluxo de caixa</span></label>
+    ${r.pg === 'caixa' ? `<div style="margin:6px 0 8px 26px">
+      <label style="max-width:200px">Data do recebimento<input type="date" value="${r.dataCx}" onchange="ix.fila[ix.i].dataCx=this.value"></label>
+      ${r.pgs.map((g, k) => `<div style="display:grid;grid-template-columns:1fr 1fr 110px 30px;gap:6px;margin-top:6px">
+        <select onchange="ixPgForma(${k},this.value)"><option value="">— forma —</option>${FORMAS.map((f) => `<option ${sel(g.forma, f)}>${f}</option>`).join('')}</select>
+        ${bancoSel('ix_b' + k, g.banco, `onchange="ix.fila[ix.i].pgs[${k}].banco=+this.value"`)}
+        <input inputmode="decimal" value="${f2(g.valor)}" oninput="ix.fila[ix.i].pgs[${k}].valor=num(this.value)||0;ixPgSt()">
+        <button class="xbtn" style="height:34px" ${r.pgs.length < 2 ? 'disabled' : ''} onclick="ix.fila[ix.i].pgs.splice(${k},1);telaImport()">×</button></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;margin-top:4px"><button class="link" onclick="ix.fila[ix.i].pgs.push({forma:'Pix',banco:bancoParaForma('Pix'),valor:0});telaImport()">+ outra forma / banco</button><span id="ix_pgst" style="font-size:13px"></span></div></div>` : ''}
+    <label class="chk"><input type="radio" name="ix_pg" ${r.pg === 'prazo' ? 'checked' : ''} onchange="ixPg('prazo')"> <span><b>A prazo</b> — mandar para Contas a receber</span></label>
+    ${r.pg === 'prazo' ? `<div style="margin:6px 0 8px 26px">${r.dups.length ? '<small class="muted">Parcelas que vieram na nota:</small>' : ''}
+      ${r.parc.map((x, k) => `<div style="display:grid;grid-template-columns:160px 120px 30px;gap:6px;margin-top:6px"><input type="date" value="${x.vencimento}" onchange="ix.fila[ix.i].parc[${k}].vencimento=this.value"><input inputmode="decimal" value="${f2(x.valor)}" oninput="ix.fila[ix.i].parc[${k}].valor=num(this.value)||0;ixPgSt()"><button class="xbtn" style="height:34px" ${r.parc.length < 2 ? 'disabled' : ''} onclick="ix.fila[ix.i].parc.splice(${k},1);telaImport()">×</button></div>`).join('')}
+      <div style="display:flex;justify-content:space-between;margin-top:4px"><button class="link" onclick="ixMaisParc()">+ parcela</button><span id="ix_pgst" style="font-size:13px"></span></div></div>` : ''}
+    <label class="chk"><input type="radio" name="ix_pg" ${r.pg === 'nada' ? 'checked' : ''} onchange="ixPg('nada')"> <span>Não lançar no financeiro (já lancei / lanço depois)</span></label>`;
+  $('#main').innerHTML = `
+    <div class="pagehead"><h1>Importar venda pelo XML</h1><div class="actions"><button class="btn" onclick="if(confirm('Sair da importação? As notas que faltam não serão importadas.')){ix=null;ir('vendas')}">Sair</button></div></div>
+    <div class="alert info" style="margin:0 0 12px">Nota <b>${ix.i + 1} de ${ix.fila.length}</b>${ix.feitos.length ? ` · ${ix.feitos.length} importada(s)` : ''}${ix.erros.length ? ` · <span style="color:var(--bad)">${ix.erros.length} arquivo(s) com erro</span>` : ''}</div>
+    <div class="card">
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center"><span class="tag blue" style="font-size:14px">${r.modelo}</span><b style="font-size:18px">nº ${esc(r.numero || '—')}</b>
+        <span class="muted">${dataHoraBR(r.data)}</span><span style="margin-left:auto;font-size:20px">Total da nota <b>${brl(r.total)}</b></span></div>
+      <div class="muted" style="font-size:11px;word-break:break-all;margin-top:4px">${esc(r.arq)}${r.chave && !r.chave.startsWith('NFSE-') ? ' · chave ' + esc(r.chave) : ''}</div>
+      ${r.dupId ? `<div class="alert bad" style="margin:10px 0 0">Esta nota <b>já foi importada</b> (venda #${r.dupId}). Ela será pulada.</div>` : ''}
+      ${r.avisos.map((a) => `<div class="alert warn" style="margin:10px 0 0">${esc(a)}</div>`).join('')}
+    </div>
+    ${r.dupId ? '' : `
+    <div class="card"><h3 style="margin-top:0">👤 Cliente</h3>${cliHtml}</div>
+    <div class="card"><h3 style="margin-top:0">${temProd ? '📦 Produtos' : '🔧 Serviço'}</h3>${itHtml}
+      ${Math.abs(T - r.total) >= 0.01 ? `<div class="muted" style="font-size:12px;text-align:right">Total pelos itens: ${brl(T)} (diferença de arredondamento de ${brl(T - r.total)} em relação à nota)</div>` : ''}</div>
+    ${r.modelo === 'NFC-e' ? `<div class="card" style="border-left:4px solid #f0b44c"><h3 style="margin-top:0">📦 Dar baixa no estoque?</h3>
+      <label class="chk"><input type="radio" name="ix_bx" ${r.baixar === true ? 'checked' : ''} onchange="ix.fila[ix.i].baixar=true;telaImport()"> <span><b>Sim</b> — foi uma venda de verdade, o produto saiu agora</span></label>
+      <label class="chk"><input type="radio" name="ix_bx" ${r.baixar === false ? 'checked' : ''} onchange="ix.fila[ix.i].baixar=false;telaImport()"> <span><b>Não</b> — o produto já tinha saído (cupom de regularização). Só registra o valor</span></label></div>`
+      : temProd ? '<div class="hint" style="margin:-4px 0 12px">NF-e: os produtos <b>saem do estoque</b> ao importar.</div>' : ''}
+    <div class="card"><h3 style="margin-top:0">💰 Pagamento ${r.pags.length ? `<small class="muted" style="font-weight:400;text-transform:none">na nota: ${esc(r.pags.map((x) => `${x.forma || 'outros'} ${brl(x.valor)}`).join(' + '))}</small>` : ''}</h3>${pgHtml}</div>
+    <div class="card"><label>Observação (opcional)<input value="${esc(r.obs || '')}" oninput="ix.fila[ix.i].obs=this.value"></label></div>`}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:30px">
+      <button class="btn" onclick="ixProxima()">${r.dupId ? 'Continuar →' : 'Pular esta nota'}</button>
+      ${r.dupId ? '' : `<button class="btn btn-primary" id="ix_go" onclick="ixImportar()">✔ Importar esta venda</button>`}
+    </div>`;
+  ixPgSt();
+  window.scrollTo(0, 0);
+}
+function ixCli(modo, id) { const r = ix.fila[ix.i]; r.cli.modo = modo; r.cli.id = modo === 'existente' ? id || null : null; telaImport(); }
+function ixProd(k, v) { const it = ix.fila[ix.i].itens[k]; it.pid = +v || null; it.auto = false; it.sugerido = false; telaImport(); }
+function ixServ(k, v) { const it = ix.fila[ix.i].itens[k]; it.sid = +v || null; it.auto = false; }
+function ixPg(m) { const r = ix.fila[ix.i]; r.pg = m; telaImport(); }
+function ixPgForma(k, f) { const g = ix.fila[ix.i].pgs[k]; g.forma = f; g.banco = bancoParaForma(f); telaImport(); }
+function ixMaisParc() { const r = ix.fila[ix.i], ult = r.parc[r.parc.length - 1]; r.parc.push({ vencimento: maisDiasDe(ult?.vencimento || r.dataCx, 30), valor: 0 }); telaImport(); }
+function ixPgSt() {
+  const r = ix?.fila[ix.i], el = $('#ix_pgst'); if (!r || !el) return;
+  const l = r.pg === 'caixa' ? r.pgs : r.pg === 'prazo' ? r.parc : null; if (!l) return;
+  const d = r2(ixTotal(r) - l.reduce((s, x) => s + (Number(x.valor) || 0), 0));
+  el.innerHTML = Math.abs(d) < 0.01 ? '<span style="color:var(--ok)">✔ Soma confere</span>' : d > 0 ? `<span style="color:var(--bad)">Falta ${brl(d)}</span>` : `<span style="color:var(--bad)">Passou ${brl(-d)}</span>`;
+}
+function ixProxima() { ix.i++; telaImport(); }
+async function ixImportar() {
+  const r = ix.fila[ix.i], T = ixTotal(r);
+  if (r.cliente && !r.cli.modo) return toast('Confirme o cliente: escolha um dos parecidos, outro cadastrado ou "cliente novo"', 'erro');
+  if (r.cli.modo === 'existente' && !r.cli.id) return toast('Escolha qual cliente cadastrado', 'erro');
+  const semProd = r.itens.findIndex((it) => it.tipo === 'produto' && !it.pid);
+  if (semProd >= 0) return toast(`Escolha o produto do estoque para "${r.itens[semProd].xProd}"`, 'erro');
+  if (r.itens.some((it) => it.tipo === 'servico' && !String(it.desc || '').trim())) return toast('Preencha a descrição do serviço', 'erro');
+  if (r.modelo === 'NFC-e' && r.baixar === null) return toast('Responda se é para dar baixa no estoque', 'erro');
+  const lista = r.pg === 'caixa' ? r.pgs : r.pg === 'prazo' ? r.parc : [];
+  if (r.pg === 'caixa' && r.pgs.some((g) => !g.forma)) return toast('Escolha a forma de pagamento', 'erro');
+  if (r.pg !== 'nada') {
+    if (lista.some((x) => !(x.valor > 0))) return toast('Preencha os valores do pagamento', 'erro');
+    const d = r2(T - lista.reduce((s, x) => s + x.valor, 0));
+    if (Math.abs(d) >= 0.01) {
+      if (Math.abs(d) <= 0.05) lista[lista.length - 1].valor = r2(lista[lista.length - 1].valor + d); // arredondamento
+      else return toast(d > 0 ? `A soma do pagamento está faltando ${brl(d)}` : `A soma do pagamento passou ${brl(-d)}`, 'erro');
+    }
+  }
+  const c = r.cliente;
+  const payload = {
+    chave: r.chave, modelo: r.modelo, numero: r.numero, data: r.data ? new Date(r.data).toISOString() : null,
+    baixar_estoque: r.baixar !== false, observacao: r.obs || null,
+    cliente_id: r.cli.modo === 'existente' ? r.cli.id : null,
+    cliente_novo: r.cli.modo === 'novo' && c ? { nome: c.nome, documento: c.documento, endereco: c.endereco, cidade: c.cidade, uf: c.uf, telefone: c.telefone, email: c.email } : null,
+    cliente_atualizar: r.cli.modo === 'existente' && c ? { documento: c.documento, endereco: c.endereco, cidade: c.cidade, uf: c.uf, telefone: c.telefone, email: c.email, nome: r.cli.nomeNota ? c.nome : null } : null,
+    itens: r.itens.map((it) => it.tipo === 'produto'
+      ? { tipo: 'produto', produto_id: it.pid, quantidade: it.qtd, preco_unit: it.preco, codigo_xml: it.cProd || it.cEAN || null }
+      : { tipo: 'servico', servico_id: it.sid, descricao: it.desc.trim(), quantidade: it.qtd, preco_unit: it.preco, chave_xml: it.sid ? it.chaveS : null }),
+    pagamento: r.pg === 'caixa' ? { modo: 'caixa', data_caixa: r.dataCx, pagamentos: r.pgs.map((g) => ({ forma: g.forma, banco_id: g.banco || bancoPadrao(), valor: r2(g.valor) })) }
+      : r.pg === 'prazo' ? { modo: 'prazo', parcelas: r.parc.map((x) => ({ vencimento: x.vencimento, valor: r2(x.valor) })) }
+      : { modo: 'nada', forma_texto: r.pags.map((x) => x.forma).filter(Boolean).join(' + ') || null },
+  };
+  $('#ix_go').disabled = true;
+  const { data, error } = await sb.rpc('importar_venda_xml', { p: payload });
+  if (error) { $('#ix_go').disabled = false; return erro(error); }
+  ix.feitos.push({ id: data.id, modelo: r.modelo, numero: r.numero, total: data.total, cliente: r.cli.modo === 'novo' ? c.nome : r.cli.id ? (r.cli.nomeNota ? c.nome : cli(r.cli.id)?.nome) : 'Consumidor' });
+  // aprende os vínculos para as próximas notas desta mesma importação
+  r.itens.forEach((it) => {
+    if (it.tipo === 'produto' && (it.cProd || it.cEAN)) ix.vinc.push({ tipo: 'produto', chave: it.cProd || it.cEAN, alvo_id: it.pid });
+    if (it.tipo === 'servico' && it.sid) ix.vinc.push({ tipo: 'servico', chave: it.chaveS, alvo_id: it.sid });
+  });
+  if (r.cli.modo === 'novo' || r.cliente) clientes = await fetchAll(() => sb.from('clientes').select('*').order('nome'));
+  if (data.cliente_id) { const o = ix.stat.get(data.cliente_id) || { n: 0, ult: '' }; o.n++; ix.stat.set(data.cliente_id, o); }
+  await recarregarProdutos();
+  ix.i++;
+  for (let k = ix.i; k < ix.fila.length; k++) ix.fila[k] = prepImport(ix.fila[k], ix.vinc, null);
+  toast(`Venda #${data.id} importada ✔`);
+  telaImport();
+}
+function fimImport() {
+  const f = ix.feitos, e = ix.erros;
+  $('#main').innerHTML = `
+    <div class="pagehead"><h1>Importação concluída</h1><div class="actions"><button class="btn btn-primary" onclick="ix=null;ir('vendas')">Ver vendas</button></div></div>
+    <div class="card"><h3 style="margin-top:0">✔ ${f.length} venda(s) importada(s)</h3>
+      ${f.length ? `<table class="tbl"><thead><tr><th>Venda</th><th>Nota</th><th>Cliente</th><th class="num">Total</th></tr></thead><tbody>${f.map((x) => `<tr class="click" onclick="verVenda(${x.id})"><td>#${x.id}</td><td>${esc(x.modelo)} ${esc(x.numero || '')}</td><td>${esc(x.cliente || '')}</td><td class="num">${brl(x.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nenhuma.</p>'}</div>
+    ${e.length ? `<div class="card"><h3 style="margin-top:0;color:var(--bad)">Arquivos não importados</h3>${e.map((x) => `<div style="font-size:13px">• ${esc(x)}</div>`).join('')}</div>` : ''}`;
+}
+
 /* ====================== VENDAS ====================== */
 let vfil = { per: 'mes', ini: '', fim: '', tipo: '' };
 function periodo() {
@@ -1419,7 +1760,7 @@ function periodo() {
 }
 function telaVendas() {
   $('#main').innerHTML = `
-    <div class="pagehead"><h1>Vendas e saídas</h1><div class="actions"><button class="btn btn-primary" onclick="venda.tipo='venda';ir('vender')">🛒 Nova venda</button><button class="btn" onclick="venda.tipo='saida';ir('vender')">📤 Saída sem venda</button></div></div>
+    <div class="pagehead"><h1>Vendas e saídas</h1><div class="actions">${isAdmin ? `<input type="file" id="vx_file" accept=".xml,text/xml" multiple class="hide" onchange="importarVendasXML(this.files);this.value=''"><button class="btn" onclick="$('#vx_file').click()" title="Importa NF-e, cupom (NFC-e) ou nota de serviço (NFS-e) emitidos em outro sistema">📥 Importar XML de venda</button>` : ''}<button class="btn btn-primary" onclick="venda.tipo='venda';ir('vender')">🛒 Nova venda</button><button class="btn" onclick="venda.tipo='saida';ir('vender')">📤 Saída sem venda</button></div></div>
     <div class="card filtros">
       <select id="vf_per" onchange="vfil.per=this.value;$('#vf_custom').classList.toggle('hide',this.value!=='custom');listaVendas()">
         ${[['hoje', 'Hoje'], ['7', 'Últimos 7 dias'], ['mes', 'Este mês'], ['mesant', 'Mês passado'], ['custom', 'Escolher datas']].map(([v, t]) => `<option value="${v}" ${vfil.per === v ? 'selected' : ''}>${t}</option>`).join('')}
@@ -1454,7 +1795,7 @@ async function listaVendas(soFiltro) {
     const ws = norm($('#vf_b').value).split(/\s+/).filter(Boolean);
     const l = vendasCache.filter((v) => (!vfil.tipo || (v.tipo || 'venda') === vfil.tipo) && ws.every((w) => norm(`${v.cliente_nome} ${v.destino || ''}`).includes(w)));
     $('#vf_l').innerHTML = l.length ? `<table class="tbl"><thead><tr><th>Cliente</th><th>Data</th><th>Pagamento</th><th>Vendedor</th><th class="num">Total</th></tr></thead><tbody>${l.map((v) => `
-      <tr class="click ${v.status === 'cancelada' ? 'cancel' : ''}" onclick="verVenda(${v.id})"><td><span class="pn">${esc(v.cliente_nome)}</span>${v.tipo === 'saida' ? ' <span class="tag warn">SAÍDA</span>' : ''}<div class="sub">#${v.id}${v.status === 'cancelada' ? ' · CANCELADA' : ''}${v.tipo === 'saida' && v.destino && v.destino !== v.cliente_nome ? ' · para ' + esc(v.destino) : ''}</div></td>
+      <tr class="click ${v.status === 'cancelada' ? 'cancel' : ''}" onclick="verVenda(${v.id})"><td><span class="pn">${esc(v.cliente_nome)}</span>${v.tipo === 'saida' ? ' <span class="tag warn">SAÍDA</span>' : ''}${v.nf_modelo ? ` <span class="tag blue">${esc(v.nf_modelo)} ${esc(v.nf_numero || '')}</span>` : ''}<div class="sub">#${v.id}${v.status === 'cancelada' ? ' · CANCELADA' : ''}${v.tipo === 'saida' && v.destino && v.destino !== v.cliente_nome ? ' · para ' + esc(v.destino) : ''}</div></td>
       <td data-l="Data">${dataHoraBR(v.data)}</td><td data-l="Pagamento">${v.tipo === 'saida' ? '<span class="muted">sem venda</span>' : esc(v.forma_pagamento || '')}</td><td data-l="Vendedor">${esc(v.vendedor || '')}</td><td class="num" data-l="Total"><b>${v.tipo === 'saida' ? '—' : brl(v.total)}</b></td></tr>`).join('')}</tbody></table>` : '<p class="muted">Nada no período.</p>';
   } catch (e) { erro(e); }
 }
@@ -1478,6 +1819,7 @@ async function verVenda(id, recemFeita) {
                 <div><small>Pagamento</small><div>${esc(v.forma_pagamento || '—')}</div></div>`}
         <div><small>Data</small><div>${dataHoraBR(v.data)}</div></div>
         <div><small>Registrado por</small><div>${esc(v.vendedor || '—')}</div></div>
+        ${v.nf_modelo ? `<div class="full"><small>Nota fiscal (importada do XML)</small><div><span class="tag blue">${esc(v.nf_modelo)} nº ${esc(v.nf_numero || '—')}</span>${v.baixou_estoque === false ? ' <span class="tag warn">sem baixa de estoque</span>' : ''}${v.nf_chave && !v.nf_chave.startsWith('NFSE-') ? `<div class="muted" style="font-size:11px;word-break:break-all">Chave ${esc(v.nf_chave)}</div>` : ''}</div></div>` : ''}
       </div>
       ${sd ? `<table class="tbl"><thead><tr><th>Produto</th><th class="num">Qtd</th>${isAdmin ? '<th class="num">Custo un.</th><th class="num">Custo total</th>' : ''}</tr></thead><tbody>
         ${v.venda_itens.map((i) => `<tr><td class="pn">${esc(i.produto_nome)}</td><td class="num" data-l="Qtd"><b>${i.quantidade}</b></td>${isAdmin ? `<td class="num" data-l="Custo un.">${brl(custos[i.id] || 0)}</td><td class="num" data-l="Custo total">${brl((custos[i.id] || 0) * i.quantidade)}</td>` : ''}</tr>`).join('')}
@@ -1592,7 +1934,7 @@ async function excluirServico(id) {
 /* ====================== CLIENTES ====================== */
 function telaClientes() {
   $('#main').innerHTML = `
-    <div class="pagehead"><h1>Clientes</h1><div class="actions"><button class="btn btn-primary" onclick="formCliente()">+ Novo cliente</button></div></div>
+    <div class="pagehead"><h1>Clientes</h1><div class="actions">${isAdmin ? '<button class="btn" onclick="formMesclar()" title="Juntar dois cadastros da mesma pessoa">🔗 Mesclar clientes</button>' : ''}<button class="btn btn-primary" onclick="formCliente()">+ Novo cliente</button></div></div>
     <div class="card filtros"><input id="cb" placeholder="🔎 Buscar cliente…" oninput="listaClientes()">
       <select id="ct" onchange="listaClientes()"><option value="">Todos</option><option value="atacado">Atacado</option><option value="varejo">Varejo</option></select></div>
     <div class="card" id="lcli"></div>`;
@@ -1605,6 +1947,28 @@ function listaClientes() {
     <tr class="click" onclick="verCliente(${c.id})"><td class="pn">${esc(c.nome)} ${c.ativo ? '' : '<span class="tag">inativo</span>'}</td><td data-l="Tipo"><span class="tag ${c.tipo === 'atacado' ? 'blue' : ''}">${c.tipo === 'atacado' ? 'Atacado' : 'Varejo'}</span></td><td data-l="Telefone">${esc(c.telefone || '')}</td><td data-l="Cidade">${esc(c.cidade || '')}</td></tr>`).join('')}</tbody></table>`
     : `<p class="muted">${clientes.length ? 'Nenhum cliente encontrado.' : 'Nenhum cliente cadastrado ainda.'}</p>`;
 }
+function formMesclar() {
+  const ops = clientes.slice().sort((a, b) => a.nome.localeCompare(b.nome)).map((c) => `<option value="${c.id}">${esc(c.nome)}${c.documento ? ' · ' + esc(c.documento) : ''}${c.telefone ? ' · ' + esc(c.telefone) : ''}</option>`).join('');
+  openModal('Mesclar clientes repetidos', `
+    <p>Junta dois cadastros da <b>mesma pessoa</b> em um só. As vendas, contas a receber e preços combinados do cadastro repetido passam para o que vai ficar, e o repetido é apagado.</p>
+    <div class="grid2">
+      <label>Cadastro que vai FICAR<select id="mg_a"><option value="">— escolher —</option>${ops}</select></label>
+      <label>Cadastro repetido (vai ser APAGADO)<select id="mg_b"><option value="">— escolher —</option>${ops}</select></label>
+    </div>
+    <p class="hint">Dados que faltarem no cadastro que fica (CPF/CNPJ, telefone, endereço…) são copiados do repetido.</p>`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="mg_go" onclick="mesclarClientes()">Mesclar</button>`);
+}
+async function mesclarClientes() {
+  const a = +$('#mg_a').value, b = +$('#mg_b').value;
+  if (!a || !b) return toast('Escolha os dois cadastros', 'erro');
+  if (a === b) return toast('Escolha dois cadastros diferentes', 'erro');
+  if (!confirm(`Juntar "${cli(b).nome}" dentro de "${cli(a).nome}"?\n\nO cadastro "${cli(b).nome}" será apagado e o histórico dele passa para "${cli(a).nome}". Não dá para desfazer.`)) return;
+  $('#mg_go').disabled = true;
+  const { error } = await sb.rpc('mesclar_clientes', { p_manter: a, p_remover: b });
+  if (error) { $('#mg_go').disabled = false; return erro(error); }
+  clientes = await fetchAll(() => sb.from('clientes').select('*').order('nome'));
+  closeModal(); toast('Clientes mesclados ✔'); if (aba === 'clientes') ir('clientes');
+}
 function formCliente(id, daVenda) {
   const c = id ? cli(id) : null;
   openModal(c ? 'Editar cliente' : 'Novo cliente', `
@@ -1614,6 +1978,9 @@ function formCliente(id, daVenda) {
       <label>Telefone / WhatsApp<input id="cf_tel" value="${esc(c?.telefone)}"></label>
       <label>CPF / CNPJ<input id="cf_doc" value="${esc(c?.documento)}"></label>
       <label>Cidade<input id="cf_cid" value="${esc(c?.cidade)}"></label>
+      <label class="full">Endereço<input id="cf_end" value="${esc(c?.endereco)}"></label>
+      <label>UF<input id="cf_uf" maxlength="2" value="${esc(c?.uf)}"></label>
+      <label>E-mail<input id="cf_mail" value="${esc(c?.email)}"></label>
       <label class="full">Observação<textarea id="cf_obs">${esc(c?.observacao)}</textarea></label>
       ${c ? `<label class="chk"><input type="checkbox" id="cf_ativo" ${c.ativo ? 'checked' : ''}> Cliente ativo</label>` : ''}
     </div>
@@ -1624,6 +1991,7 @@ async function salvarCliente(id, daVenda) {
   const g = (i) => document.getElementById(i)?.value?.trim();
   if (!g('cf_nome')) return toast('Informe o nome', 'erro');
   const body = { nome: g('cf_nome'), tipo: g('cf_tipo'), telefone: g('cf_tel') || null, documento: g('cf_doc') || null, cidade: g('cf_cid') || null, observacao: g('cf_obs') || null };
+  if (document.getElementById('cf_end')) Object.assign(body, { endereco: g('cf_end') || null, uf: (g('cf_uf') || '').toUpperCase() || null, email: g('cf_mail') || null });
   if (id) body.ativo = $('#cf_ativo').checked;
   $('#cf_go').disabled = true;
   const r = id ? await sb.from('clientes').update(body).eq('id', id).select().single() : await sb.from('clientes').insert(body).select().single();
@@ -1643,8 +2011,8 @@ async function verCliente(id) {
   openModal(esc(c.nome), `
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px">
       <span class="tag ${c.tipo === 'atacado' ? 'blue' : ''}">${c.tipo === 'atacado' ? 'Atacado' : 'Varejo'}</span>
-      ${c.telefone ? `<span class="tag">📞 ${esc(c.telefone)}</span>` : ''}${c.documento ? `<span class="tag">${esc(c.documento)}</span>` : ''}${c.cidade ? `<span class="tag">${esc(c.cidade)}</span>` : ''}
-    </div>
+      ${c.telefone ? `<span class="tag">📞 ${esc(c.telefone)}</span>` : ''}${c.documento ? `<span class="tag">${esc(c.documento)}</span>` : ''}${c.cidade ? `<span class="tag">${esc(c.cidade)}${c.uf ? '/' + esc(c.uf) : ''}</span>` : ''}${c.email ? `<span class="tag">✉ ${esc(c.email)}</span>` : ''}
+    </div>${c.endereco ? `<div class="muted" style="font-size:13px;margin:-2px 0 6px">${esc(c.endereco)}</div>` : ''}
     ${c.observacao ? `<p class="hint">${esc(c.observacao)}</p>` : ''}
     <h3>Preços combinados com este cliente</h3>
     ${isAdmin ? `<div style="display:grid;grid-template-columns:1fr 130px auto;gap:8px;align-items:end;margin-bottom:8px">
