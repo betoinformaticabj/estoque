@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<!-- versão 2026-11-24b -->
+<!-- versão 2026-11-25 -->
 <title>Estoque · Beto Informática</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -1571,7 +1571,7 @@ function prepImport(r, vinc, dup) {
     }
     it.preco = r2(it.valor / it.qtd);
   });
-  r.baixar = r.modelo === 'NFC-e' ? null : true;
+  r.bx = r.modelo === 'NFC-e' ? null : 'sim'; // sim | nao | item
   // pagamento
   r.dataCx = dataLocalISO(r.data);
   const prazo = r.pags.some((x) => ['15', '90'].includes(x.t));
@@ -1589,6 +1589,14 @@ function prepImport(r, vinc, dup) {
 const dataLocalISO = (d) => { const x = d ? new Date(d.length === 10 ? d + 'T12:00:00' : d) : new Date(); return isNaN(x) ? hojeISO() : x.getFullYear() + '-' + String(x.getMonth() + 1).padStart(2, '0') + '-' + String(x.getDate()).padStart(2, '0'); };
 const maisDiasDe = (iso, n) => { const d = new Date(iso + 'T12:00:00'); d.setDate(d.getDate() + n); return dataLocalISO(d.toISOString()); };
 const ixTotal = (r) => r2(r.itens.reduce((s, it) => s + it.qtd * it.preco, 0));
+// este item vai sair do estoque? (nunca deixa o estoque negativo)
+function ixBx(r, it) {
+  if (it.tipo !== 'produto' || !it.pid) return false;
+  const p = prod(it.pid); if (!p || p.estoque < it.qtd) return false;
+  if (r.bx === 'sim') return true;
+  if (r.bx === 'item') return it.baixar !== false;
+  return false;
+}
 function telaImport() {
   const r = ix.fila[ix.i];
   if (!r) return fimImport();
@@ -1621,17 +1629,23 @@ function telaImport() {
         <label>Descrição na venda<input value="${esc(it.desc)}" oninput="ix.fila[ix.i].itens[${k}].desc=this.value"></label>
       </div></div>`;
     const p = it.pid ? prod(it.pid) : null;
-    const falta = p && r.baixar !== false && it.qtd > p.estoque;
-    return `<div style="border:1px solid ${it.pid ? 'var(--line)' : '#f0b44c'};border-radius:10px;padding:10px;margin-bottom:8px">
+    const semQtd = p && p.estoque < it.qtd, vaiBaixar = ixBx(r, it);
+    return `<div style="border:1px solid ${it.pid || it.semVinc ? 'var(--line)' : '#f0b44c'};border-radius:10px;padding:10px;margin-bottom:8px">
       <b>${esc(it.xProd)}</b> <span class="muted" style="font-size:12px">cód. ${esc(it.cProd || '—')}${it.cEAN ? ' · EAN ' + esc(it.cEAN) : ''}</span>${valor}
       ${it.qXml !== it.qtd ? `<div class="muted" style="font-size:12px;color:var(--bad)">A nota tem quantidade fracionada; no estoque entra ${it.qtd} un.</div>` : ''}
-      <label style="margin-top:6px">${it.pid ? (it.auto ? '<span class="tag ok">✔ Produto vinculado</span>' : it.sugerido ? '<span class="tag warn">Sugerido pelo nome — confira</span>' : '<span class="tag blue">Produto escolhido</span>') : '<span class="tag warn">⚠ Escolha o produto do seu estoque</span>'}
+      <label style="margin-top:6px">${it.semVinc ? '<span class="tag">Sem vínculo</span>' : it.pid ? (it.auto ? '<span class="tag ok">✔ Produto vinculado</span>' : it.sugerido ? '<span class="tag warn">Sugerido pelo nome — confira</span>' : '<span class="tag blue">Produto escolhido</span>') : '<span class="tag warn">⚠ Escolha o produto do seu estoque (ou "Não vincular")</span>'}
         <select onchange="ixProd(${k},this.value)">
           <option value="">— escolher produto —</option>
+          <option value="-1" ${it.semVinc ? 'selected' : ''}>➖ Não vincular — não tenho no estoque (só registrar na venda)</option>
           ${it.sugs.length ? `<optgroup label="Parecidos">${it.sugs.map((x) => `<option value="${x.p.id}" ${sel(it.pid, x.p.id)}>${esc(x.p.nome)} (${Math.round(x.sc * 100)}% · estoque ${x.p.estoque})</option>`).join('')}</optgroup>` : ''}
           <optgroup label="Todos os produtos">${produtos.filter((x) => x.ativo || x.id === it.pid).sort((a, b) => a.nome.localeCompare(b.nome)).map((x) => `<option value="${x.id}" ${it.sugs.some((y) => y.p.id === x.id) ? '' : sel(it.pid, x.id)}>${esc(x.nome)} (estoque ${x.estoque})</option>`).join('')}</optgroup>
         </select></label>
-      ${falta ? `<div style="font-size:12px;color:var(--bad);margin-top:4px">Atenção: no seu estoque tem ${p.estoque}; vai ficar ${p.estoque - it.qtd}.</div>` : ''}
+      ${it.semVinc ? '<div style="font-size:12px;margin-top:4px" class="muted">Entra só como item da venda, com a descrição da nota. <b>Não mexe no estoque</b> e não fica ligado a nenhum produto.</div>'
+        : p ? `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;margin-top:6px">
+          ${r.bx === 'item' && !semQtd ? `<label class="chk" style="margin:0"><input type="checkbox" ${it.baixar !== false ? 'checked' : ''} onchange="ix.fila[ix.i].itens[${k}].baixar=this.checked;telaImport()"> Dar baixa no estoque</label>` : ''}
+          ${semQtd ? `<span style="color:var(--bad)">⚠ No estoque tem só <b>${p.estoque}</b> — este produto <b>não vai baixar</b>, para o estoque não ficar negativo.</span>`
+            : vaiBaixar ? `<span>📦 Estoque: <b>${p.estoque} → ${p.estoque - it.qtd}</b></span>` : r.bx ? `<span class="muted">📦 Estoque não muda (fica ${p.estoque})</span>` : `<span class="muted">No estoque: ${p.estoque}</span>`}
+        </div>` : ''}
     </div>`;
   }).join('');
   const temProd = r.itens.some((it) => it.tipo === 'produto');
@@ -1662,14 +1676,18 @@ function telaImport() {
     </div>
     ${r.dupId ? '' : `
     <div class="card"><h3 style="margin-top:0">👤 Cliente</h3>${cliHtml}</div>
+    ${temProd ? `<div class="card" style="border-left:4px solid ${r.bx ? 'var(--line)' : '#f0b44c'}"><h3 style="margin-top:0">📦 Esta venda mexe no estoque?</h3>
+      <label class="chk"><input type="radio" name="ix_bx" ${r.bx === 'sim' ? 'checked' : ''} onchange="ixBxModo('sim')"> <span><b>Sim</b> — dar baixa nos produtos que saíram agora</span></label>
+      <label class="chk"><input type="radio" name="ix_bx" ${r.bx === 'nao' ? 'checked' : ''} onchange="ixBxModo('nao')"> <span><b>Não</b> — só registrar a venda, o estoque não muda (produto já tinha saído / não está no estoque)</span></label>
+      <label class="chk"><input type="radio" name="ix_bx" ${r.bx === 'item' ? 'checked' : ''} onchange="ixBxModo('item')"> <span><b>Escolher produto por produto</b></span></label>
+      <div class="hint" style="margin-top:4px">O estoque nunca fica negativo: se não tiver a quantidade, aquele produto não baixa.</div></div>` : ''}
     <div class="card"><h3 style="margin-top:0">${temProd ? '📦 Produtos' : '🔧 Serviço'}</h3>${itHtml}
       ${Math.abs(T - r.total) >= 0.01 ? `<div class="muted" style="font-size:12px;text-align:right">Total pelos itens: ${brl(T)} (diferença de arredondamento de ${brl(T - r.total)} em relação à nota)</div>` : ''}</div>
-    ${r.modelo === 'NFC-e' ? `<div class="card" style="border-left:4px solid #f0b44c"><h3 style="margin-top:0">📦 Dar baixa no estoque?</h3>
-      <label class="chk"><input type="radio" name="ix_bx" ${r.baixar === true ? 'checked' : ''} onchange="ix.fila[ix.i].baixar=true;telaImport()"> <span><b>Sim</b> — foi uma venda de verdade, o produto saiu agora</span></label>
-      <label class="chk"><input type="radio" name="ix_bx" ${r.baixar === false ? 'checked' : ''} onchange="ix.fila[ix.i].baixar=false;telaImport()"> <span><b>Não</b> — o produto já tinha saído (cupom de regularização). Só registra o valor</span></label></div>`
-      : temProd ? '<div class="hint" style="margin:-4px 0 12px">NF-e: os produtos <b>saem do estoque</b> ao importar.</div>' : ''}
+    <div class="card"><h3 style="margin-top:0">📝 O que foi feito de verdade nesta venda <small class="muted" style="font-weight:400;text-transform:none">(anotação interna, opcional)</small></h3>
+      <textarea id="ix_obs" rows="2" style="width:100%" placeholder="Ex.: na verdade foi um serviço de visita técnica para o cliente Fulano" oninput="ix.fila[ix.i].obs=this.value">${esc(r.obs || '')}</textarea>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${['Na verdade foi serviço prestado', 'Produto já tinha saído do estoque (venda antiga)', 'Produto comprado fora do estoque (pessoa física)', 'Cliente não quis informar os dados'].map((t) => `<button class="btn btn-sm" onclick="ixObs('${t}')">+ ${t}</button>`).join('')}</div></div>
     <div class="card"><h3 style="margin-top:0">💰 Pagamento ${r.pags.length ? `<small class="muted" style="font-weight:400;text-transform:none">na nota: ${esc(r.pags.map((x) => `${x.forma || 'outros'} ${brl(x.valor)}`).join(' + '))}</small>` : ''}</h3>${pgHtml}</div>
-    <div class="card"><label>Observação (opcional)<input value="${esc(r.obs || '')}" oninput="ix.fila[ix.i].obs=this.value"></label></div>`}
+`}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:30px">
       <button class="btn" onclick="ixProxima()">${r.dupId ? 'Continuar →' : 'Pular esta nota'}</button>
       ${r.dupId ? '' : `<button class="btn btn-primary" id="ix_go" onclick="ixImportar()">✔ Importar esta venda</button>`}
@@ -1678,7 +1696,9 @@ function telaImport() {
   window.scrollTo(0, 0);
 }
 function ixCli(modo, id) { const r = ix.fila[ix.i]; r.cli.modo = modo; r.cli.id = modo === 'existente' ? id || null : null; telaImport(); }
-function ixProd(k, v) { const it = ix.fila[ix.i].itens[k]; it.pid = +v || null; it.auto = false; it.sugerido = false; telaImport(); }
+function ixProd(k, v) { const it = ix.fila[ix.i].itens[k]; it.semVinc = v === '-1'; it.pid = it.semVinc ? null : +v || null; it.auto = false; it.sugerido = false; telaImport(); }
+function ixBxModo(m) { ix.fila[ix.i].bx = m; telaImport(); }
+function ixObs(t) { const r = ix.fila[ix.i]; r.obs = (r.obs ? r.obs.trim() + '. ' : '') + t; const el = $('#ix_obs'); if (el) { el.value = r.obs; el.focus(); } }
 function ixServ(k, v) { const it = ix.fila[ix.i].itens[k]; it.sid = +v || null; it.auto = false; }
 function ixPg(m) { const r = ix.fila[ix.i]; r.pg = m; telaImport(); }
 function ixPgForma(k, f) { const g = ix.fila[ix.i].pgs[k]; g.forma = f; g.banco = bancoParaForma(f); telaImport(); }
@@ -1694,10 +1714,10 @@ async function ixImportar() {
   const r = ix.fila[ix.i], T = ixTotal(r);
   if (r.cliente && !r.cli.modo) return toast('Confirme o cliente: escolha um dos parecidos, outro cadastrado ou "cliente novo"', 'erro');
   if (r.cli.modo === 'existente' && !r.cli.id) return toast('Escolha qual cliente cadastrado', 'erro');
-  const semProd = r.itens.findIndex((it) => it.tipo === 'produto' && !it.pid);
-  if (semProd >= 0) return toast(`Escolha o produto do estoque para "${r.itens[semProd].xProd}"`, 'erro');
+  const semProd = r.itens.findIndex((it) => it.tipo === 'produto' && !it.pid && !it.semVinc);
+  if (semProd >= 0) return toast(`Escolha o produto do estoque para "${r.itens[semProd].xProd}" (ou "Não vincular")`, 'erro');
   if (r.itens.some((it) => it.tipo === 'servico' && !String(it.desc || '').trim())) return toast('Preencha a descrição do serviço', 'erro');
-  if (r.modelo === 'NFC-e' && r.baixar === null) return toast('Responda se é para dar baixa no estoque', 'erro');
+  if (r.itens.some((it) => it.tipo === 'produto') && !r.bx) return toast('Responda se esta venda mexe no estoque', 'erro');
   const lista = r.pg === 'caixa' ? r.pgs : r.pg === 'prazo' ? r.parc : [];
   if (r.pg === 'caixa' && r.pgs.some((g) => !g.forma)) return toast('Escolha a forma de pagamento', 'erro');
   if (r.pg !== 'nada') {
@@ -1711,12 +1731,13 @@ async function ixImportar() {
   const c = r.cliente;
   const payload = {
     chave: r.chave, modelo: r.modelo, numero: r.numero, data: r.data ? new Date(r.data).toISOString() : null,
-    baixar_estoque: r.baixar !== false, observacao: r.obs || null,
+    baixar_estoque: r.itens.some((it) => ixBx(r, it)), observacao: (r.obs || '').trim() || null,
     cliente_id: r.cli.modo === 'existente' ? r.cli.id : null,
     cliente_novo: r.cli.modo === 'novo' && c ? { nome: c.nome, documento: c.documento, endereco: c.endereco, cidade: c.cidade, uf: c.uf, telefone: c.telefone, email: c.email } : null,
     cliente_atualizar: r.cli.modo === 'existente' && c ? { documento: c.documento, endereco: c.endereco, cidade: c.cidade, uf: c.uf, telefone: c.telefone, email: c.email, nome: r.cli.nomeNota ? c.nome : null } : null,
     itens: r.itens.map((it) => it.tipo === 'produto'
-      ? { tipo: 'produto', produto_id: it.pid, quantidade: it.qtd, preco_unit: it.preco, codigo_xml: it.cProd || it.cEAN || null }
+      ? (it.semVinc ? { tipo: 'produto', produto_id: null, descricao: it.xProd, quantidade: it.qtd, preco_unit: it.preco }
+        : { tipo: 'produto', produto_id: it.pid, quantidade: it.qtd, preco_unit: it.preco, codigo_xml: it.cProd || it.cEAN || null, baixar: ixBx(r, it) })
       : { tipo: 'servico', servico_id: it.sid, descricao: it.desc.trim(), quantidade: it.qtd, preco_unit: it.preco, chave_xml: it.sid ? it.chaveS : null }),
     pagamento: r.pg === 'caixa' ? { modo: 'caixa', data_caixa: r.dataCx, pagamentos: r.pgs.map((g) => ({ forma: g.forma, banco_id: g.banco || bancoPadrao(), valor: r2(g.valor) })) }
       : r.pg === 'prazo' ? { modo: 'prazo', parcelas: r.parc.map((x) => ({ vencimento: x.vencimento, valor: r2(x.valor) })) }
@@ -1728,7 +1749,7 @@ async function ixImportar() {
   ix.feitos.push({ id: data.id, modelo: r.modelo, numero: r.numero, total: data.total, cliente: r.cli.modo === 'novo' ? c.nome : r.cli.id ? (r.cli.nomeNota ? c.nome : cli(r.cli.id)?.nome) : 'Consumidor' });
   // aprende os vínculos para as próximas notas desta mesma importação
   r.itens.forEach((it) => {
-    if (it.tipo === 'produto' && (it.cProd || it.cEAN)) ix.vinc.push({ tipo: 'produto', chave: it.cProd || it.cEAN, alvo_id: it.pid });
+    if (it.tipo === 'produto' && it.pid && (it.cProd || it.cEAN)) ix.vinc.push({ tipo: 'produto', chave: it.cProd || it.cEAN, alvo_id: it.pid });
     if (it.tipo === 'servico' && it.sid) ix.vinc.push({ tipo: 'servico', chave: it.chaveS, alvo_id: it.sid });
   });
   if (r.cli.modo === 'novo' || r.cliente) clientes = await fetchAll(() => sb.from('clientes').select('*').order('nome'));
@@ -1826,7 +1847,7 @@ async function verVenda(id, recemFeita) {
         </tbody></table>${isAdmin ? `<div style="text-align:right;margin-top:10px;font-size:18px">Custo (despesa): <b style="color:var(--bad)">${brl(tc)}</b></div>` : ''}
         <p class="hint">Saída sem venda: não gera faturamento, mas o custo do produto entra como despesa no lucro real do mês.</p>`
       : `<table class="tbl"><thead><tr><th>Produto / serviço</th><th class="num">Qtd</th><th class="num">Preço</th>${isAdmin ? '<th class="num">Custo</th><th class="num">Lucro</th>' : ''}<th class="num">Subtotal</th></tr></thead><tbody>
-      ${v.venda_itens.map((i) => { const cu = custos[i.id] || 0; return `<tr><td class="pn">${i.tipo === 'servico' ? '<span class="tag blue" style="font-size:11px">SERVIÇO</span> ' : ''}${esc(i.produto_nome)}</td><td class="num" data-l="Qtd">${i.quantidade}</td><td class="num" data-l="Preço">${brl(i.preco_unit)}</td>
+      ${v.venda_itens.map((i) => { const cu = custos[i.id] || 0; return `<tr><td class="pn">${i.tipo === 'servico' ? '<span class="tag blue" style="font-size:11px">SERVIÇO</span> ' : ''}${esc(i.produto_nome)}${i.tipo !== 'servico' && !i.produto_id && !sd ? ' <span class="tag" style="font-size:11px">sem vínculo</span>' : ''}${i.produto_id && i.baixou_estoque === false ? ' <span class="tag warn" style="font-size:11px">sem baixa no estoque</span>' : ''}</td><td class="num" data-l="Qtd">${i.quantidade}</td><td class="num" data-l="Preço">${brl(i.preco_unit)}</td>
         ${isAdmin ? `<td class="num" data-l="Custo">${brl(cu)}</td><td class="num" data-l="Lucro">${brl((i.preco_unit - cu) * i.quantidade)}</td>` : ''}<td class="num" data-l="Subtotal"><b>${brl(i.quantidade * i.preco_unit)}</b></td></tr>`; }).join('')}
       </tbody></table>
       <div style="text-align:right;margin-top:10px;font-size:20px">Total: <b>${brl(v.total)}</b></div>
