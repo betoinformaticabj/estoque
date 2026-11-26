@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex,nofollow">
-<!-- versão 2026-11-25 -->
+<!-- versão 2026-11-26 -->
 <title>Estoque · Beto Informática</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -1094,7 +1094,7 @@ async function excluirEntrada(id) {
 }
 
 /* ====================== VENDER ====================== */
-const vendaNova = (tipo = 'venda') => ({ cliente: null, itens: [], precosCli: {}, forma: 'Pix', obs: '', tipo, destino: '', cond: 'avista', caixa: null, parcelas: 1, venc: '', pags: null, banco: null });
+const vendaNova = (tipo = 'venda') => ({ cliente: null, itens: [], precosCli: {}, forma: 'Pix', obs: '', tipo, destino: '', cond: 'avista', caixa: null, parcelas: 1, venc: '', pags: null, banco: null, gar: garNova() });
 const maisDias = (n) => { const d = new Date(); d.setDate(d.getDate() + n); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
 let venda = vendaNova();
 const ehSaida = () => venda.tipo === 'saida';
@@ -1142,6 +1142,7 @@ function telaVender() {
           ${isAdmin ? `<div id="vd_lucro" style="margin-bottom:12px"></div>` : ''}
           <div id="vd_pag"></div>
           <label style="margin-top:10px">Observação<textarea id="vd_obs" oninput="venda.obs=this.value">${esc(venda.obs)}</textarea></label>
+          <div id="vd_gar" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">${garHTML('vd_gar', venda.gar || (venda.gar = garNova()))}</div>
           <button class="btn btn-ok" style="width:100%;margin-top:12px;padding:13px;font-size:16px" id="vd_go" onclick="finalizarVenda()">✔ Finalizar venda</button>`}
       </div>
     </div>`;
@@ -1381,6 +1382,8 @@ async function finalizarVenda() {
   if (!sd && venda.cond === 'prazo' && !venda.cliente) return toast('Venda a prazo: escolha o cliente (quem vai pagar)', 'erro');
   if (!sd && venda.cond === 'prazo' && !venda.venc) return toast('Informe o 1º vencimento', 'erro');
   if (!sd && venda.cond === 'avista' && venda.caixa === null) return toast('Responda: lançar esta venda no fluxo de caixa? (Sim ou Não)', 'erro');
+  if (!sd && venda.gar?.on && !String(venda.gar.desc || '').trim()) venda.gar.desc = garDescPadrao(venda.itens);
+  if (!sd && !garValida(venda.gar)) return;
   const dividido = !sd && venda.cond === 'avista' && venda.pags && venda.pags.length > 1;
   if (dividido) {
     if (venda.pags.some((p) => !(p.valor > 0))) return toast('Preencha o valor de cada forma de pagamento', 'erro');
@@ -1400,11 +1403,130 @@ async function finalizarVenda() {
     p_pagamentos: (dividido && venda.caixa === true) ? venda.pags.map((p) => ({ forma: p.forma, banco_id: p.banco || bancoPadrao(), valor: r2(p.valor) })) : null,
   });
   if (error) { b.disabled = false; return erro(error); }
+  if (!sd && venda.gar?.on) await garSalvar(venda.gar, data.id, hojeISO());
   venda = vendaNova(venda.tipo);
   await recarregarProdutos();
   telaVender();
   toast(sd ? 'Saída registrada ✔' : 'Venda registrada ✔');
   verVenda(data.id, true);
+}
+
+/* ====================== GARANTIA ====================== */
+const PRAZOS_GAR = [[30, '30 dias'], [60, '60 dias'], [90, '3 meses (90 dias)'], [180, '6 meses (180 dias)'], [365, '1 ano (365 dias)']];
+function garNova() { return { on: false, prazo: 90, outro: '', desc: '', equip: '', serie: '', contador: '', obs: '' }; }
+const GAR = {}; // caixa na tela -> objeto da garantia
+function garHTML(box, g, descPadrao) {
+  GAR[box] = g;
+  if (!g.desc && descPadrao) g.desc = descPadrao;
+  const out = !PRAZOS_GAR.some(([d]) => d === g.prazo);
+  return `<label class="chk" style="margin:0"><input type="checkbox" ${g.on ? 'checked' : ''} onchange="GAR['${box}'].on=this.checked;garRender('${box}')"> <b>🛡 Esta venda tem garantia</b></label>
+    ${g.on ? `<div class="grid2" style="margin-top:8px">
+      <label class="${out ? '' : 'full'}">Prazo da garantia<select onchange="GAR['${box}'].prazo=this.value==='x'?0:+this.value;garRender('${box}')">${PRAZOS_GAR.map(([d, t]) => `<option value="${d}" ${g.prazo === d ? 'selected' : ''}>${t}</option>`).join('')}<option value="x" ${out ? 'selected' : ''}>Outro (em dias)…</option></select></label>
+      ${out ? `<label>Quantos dias?<input type="number" min="1" value="${g.prazo || ''}" oninput="GAR['${box}'].prazo=parseInt(this.value)||0"></label>` : ''}
+      <label class="full">O que está na garantia *<input value="${esc(g.desc)}" placeholder="Ex.: troca do cabeçote de impressão" oninput="GAR['${box}'].desc=this.value"></label>
+      <label>Equipamento<input value="${esc(g.equip)}" placeholder="Ex.: Impressora Epson L3250" oninput="GAR['${box}'].equip=this.value"></label>
+      <label>Nº de série<input value="${esc(g.serie)}" oninput="GAR['${box}'].serie=this.value"></label>
+      <label>Contador de impressões (hoje)<input inputmode="numeric" value="${esc(g.contador)}" placeholder="Ex.: 12540" oninput="GAR['${box}'].contador=this.value.replace(/\\D/g,'')"></label>
+      <label>Observação da garantia<input value="${esc(g.obs)}" placeholder="Ex.: não cobre mau uso / tinta não original" oninput="GAR['${box}'].obs=this.value"></label>
+    </div>` : ''}`;
+}
+function garRender(box) { const el = $('#' + box); if (!el) return; if (box === 'vd_gar' && !GAR[box].desc) GAR[box].desc = garDescPadrao(venda.itens); el.innerHTML = garHTML(box, GAR[box]); }
+function garValida(g) {
+  if (!g?.on) return true;
+  if (!(g.prazo > 0)) { toast('Informe o prazo da garantia', 'erro'); return false; }
+  if (!String(g.desc || '').trim()) { toast('Descreva o que está na garantia', 'erro'); return false; }
+  return true;
+}
+async function garSalvar(g, vendaId, inicio) {
+  if (!g?.on) return null;
+  const { data: v } = await sb.from('vendas').select('cliente_id,cliente_nome').eq('id', vendaId).single();
+  const { error } = await sb.from('garantias').insert({
+    venda_id: vendaId, cliente_id: v?.cliente_id || null, cliente_nome: v?.cliente_nome || null,
+    descricao: g.desc.trim(), equipamento: g.equip.trim() || null, numero_serie: g.serie.trim() || null,
+    contador: g.contador ? +g.contador : null, prazo_dias: g.prazo, inicio: inicio || hojeISO(), observacao: g.obs.trim() || null, usuario: me?.nome || null,
+  });
+  if (error) { erro(error); return false; }
+  return true;
+}
+const garDias = (g) => Math.round((new Date(g.fim + 'T12:00:00') - new Date(hojeISO() + 'T12:00:00')) / 86400000);
+const garTag = (g) => { const d = garDias(g); return d >= 0 ? `<span class="tag ${d <= 15 ? 'warn' : 'ok'}">Na garantia · ${d === 0 ? 'vence hoje' : `faltam ${d} dia(s)`}</span>` : `<span class="tag bad">Vencida há ${-d} dia(s)</span>`; };
+const garDescPadrao = (itens) => itens.map((i) => i.desc || i.produto_nome || i.xProd || (i.pid ? prod(i.pid)?.nome : '')).filter(Boolean).join(' + ').slice(0, 200);
+// garantia numa venda já feita
+function formGarantia(vendaId) {
+  const v = window._vendaAtual;
+  const g = garNova(); g.on = true;
+  openModal(`🛡 Garantia — venda #${vendaId}`, `<div id="gm_box">${garHTML('gm_box', g, garDescPadrao(v?.venda_itens || []))}</div>
+    <label style="margin-top:8px;max-width:220px">Início da garantia<input type="date" id="gm_ini" value="${dataLocalISO(v?.data)}"></label>`,
+    `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn btn-primary" id="gm_go" onclick="salvarGarantiaVenda(${vendaId})">Salvar garantia</button>`);
+}
+async function salvarGarantiaVenda(vendaId) {
+  const g = GAR.gm_box; g.on = true;
+  if (!garValida(g)) return;
+  $('#gm_go').disabled = true;
+  const ok = await garSalvar(g, vendaId, $('#gm_ini').value);
+  if (!ok) { $('#gm_go').disabled = false; return; }
+  toast('Garantia registrada ✔'); verVenda(vendaId);
+}
+async function excluirGarantia(id, vendaId) {
+  if (!confirm('Excluir esta garantia?')) return;
+  const { error } = await sb.from('garantias').delete().eq('id', id);
+  if (error) return erro(error);
+  toast('Garantia excluída'); vendaId ? verVenda(vendaId) : listaGarantias();
+}
+function garCard(g, comVenda) {
+  return `<div style="border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b>🛡 ${esc(g.descricao)}</b> ${garTag(g)}</div>
+    <div class="muted" style="font-size:13px;margin-top:4px">${[g.equipamento, g.numero_serie ? 'série ' + g.numero_serie : '', g.contador != null ? `contador na venda: <b>${Number(g.contador).toLocaleString('pt-BR')}</b>` : ''].filter(Boolean).join(' · ')}</div>
+    <div style="font-size:13px;margin-top:2px">${dataBR(g.inicio)} até <b>${dataBR(g.fim)}</b> (${g.prazo_dias} dias)${g.observacao ? ` · ${esc(g.observacao)}` : ''}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+      <button class="btn btn-sm" onclick="consultarGarantia(${g.id})">🔎 Cliente voltou com problema</button>
+      ${comVenda && g.venda_id ? `<button class="btn btn-sm" onclick="verVenda(${g.venda_id})">Ver venda #${g.venda_id}</button>` : ''}
+      ${isAdmin ? `<button class="btn btn-sm btn-danger" onclick="excluirGarantia(${g.id},${comVenda ? 'null' : g.venda_id})">Excluir</button>` : ''}
+    </div></div>`;
+}
+// cliente voltou: está na garantia? quanto imprimiu desde a venda?
+async function consultarGarantia(id) {
+  const { data: g, error } = await sb.from('garantias').select('*').eq('id', id).single();
+  if (error) return erro(error);
+  window._garAtual = g;
+  const usoDias = Math.max(1, Math.round((new Date(hojeISO() + 'T12:00:00') - new Date(g.inicio + 'T12:00:00')) / 86400000));
+  openModal('🔎 Conferir garantia', `
+    <p><b>${esc(g.cliente_nome || 'Consumidor')}</b> · ${esc(g.descricao)}<br><span class="muted">${esc([g.equipamento, g.numero_serie ? 'série ' + g.numero_serie : ''].filter(Boolean).join(' · '))}</span></p>
+    <div style="font-size:16px;margin-bottom:10px">${garTag(g)} <span class="muted">(${dataBR(g.inicio)} a ${dataBR(g.fim)} · em uso há ${usoDias} dia(s))</span></div>
+    ${g.contador != null ? `<div class="grid2">
+      <label>Contador na venda<input disabled value="${Number(g.contador).toLocaleString('pt-BR')}"></label>
+      <label>Contador hoje<input id="cg_hoje" inputmode="numeric" placeholder="Digite o contador atual" oninput="garUso(${g.contador},${usoDias})"></label>
+    </div><div id="cg_res" style="margin-top:10px"></div>` : '<p class="muted">O contador de impressões não foi anotado na venda.</p>'}`,
+    `<button class="btn" onclick="closeModal()">Fechar</button>${g.venda_id ? `<button class="btn" onclick="verVenda(${g.venda_id})">Ver venda #${g.venda_id}</button>` : ''}`);
+}
+function garUso(ini, dias) {
+  const h = +($('#cg_hoje').value || '').replace(/\D/g, ''), el = $('#cg_res');
+  if (!h) { el.innerHTML = ''; return; }
+  const d = h - ini;
+  el.innerHTML = d < 0 ? '<div class="alert bad" style="margin:0">O contador de hoje está <b>menor</b> que o da venda. Confira o número (ou a placa/contador foi trocado).</div>'
+    : `<div class="alert info" style="margin:0">Desde a venda: <b>${d.toLocaleString('pt-BR')} impressões</b> em ${dias} dia(s) — média de <b>${Math.round(d / dias).toLocaleString('pt-BR')} por dia</b> (~${Math.round(d / dias * 30).toLocaleString('pt-BR')} por mês).</div>`;
+}
+// tela de consulta de garantias
+let garFil = { b: '', sit: 'vigentes' };
+async function telaGarantias() {
+  $('#main').innerHTML = `
+    <div class="pagehead"><h1>🛡 Garantias</h1><div class="actions"><button class="btn" onclick="ir('vendas')">← Voltar para Vendas</button></div></div>
+    <div class="card filtros">
+      <input placeholder="🔎 Buscar cliente, equipamento, nº de série ou o que foi feito…" value="${esc(garFil.b)}" oninput="garFil.b=this.value;listaGarantias()">
+      <select onchange="garFil.sit=this.value;listaGarantias()">${[['vigentes', 'Na garantia'], ['vencidas', 'Vencidas'], ['todas', 'Todas']].map(([v, t]) => `<option value="${v}" ${garFil.sit === v ? 'selected' : ''}>${t}</option>`).join('')}</select>
+    </div>
+    <div class="card" id="gar_l"><p class="muted">Carregando…</p></div>`;
+  listaGarantias();
+}
+async function listaGarantias() {
+  try {
+    let q = () => { let x = sb.from('garantias').select('*').order('fim', { ascending: garFil.sit !== 'vencidas' }); if (garFil.sit === 'vigentes') x = x.gte('fim', hojeISO()); if (garFil.sit === 'vencidas') x = x.lt('fim', hojeISO()); return x; };
+    const l = await fetchAll(q);
+    const ws = norm(garFil.b).split(/\s+/).filter(Boolean);
+    const f = l.filter((g) => ws.every((w) => norm(`${g.cliente_nome || ''} ${g.descricao} ${g.equipamento || ''} ${g.numero_serie || ''} ${g.observacao || ''}`).includes(w)));
+    $('#gar_l').innerHTML = f.length ? `<div class="muted" style="font-size:13px">${f.length} garantia(s)</div>` + f.map((g) => `<div><div style="margin-top:12px;font-weight:600">${esc(g.cliente_nome || 'Consumidor')}</div>${garCard(g, true)}</div>`).join('')
+      : '<p class="muted">Nenhuma garantia encontrada.</p>';
+  } catch (e) { erro(e); }
 }
 
 /* ====================== IMPORTAR VENDA PELO XML ====================== */
@@ -1572,6 +1694,7 @@ function prepImport(r, vinc, dup) {
     it.preco = r2(it.valor / it.qtd);
   });
   r.bx = r.modelo === 'NFC-e' ? null : 'sim'; // sim | nao | item
+  if (!r.gar) r.gar = garNova();
   // pagamento
   r.dataCx = dataLocalISO(r.data);
   const prazo = r.pags.some((x) => ['15', '90'].includes(x.t));
@@ -1686,6 +1809,7 @@ function telaImport() {
     <div class="card"><h3 style="margin-top:0">📝 O que foi feito de verdade nesta venda <small class="muted" style="font-weight:400;text-transform:none">(anotação interna, opcional)</small></h3>
       <textarea id="ix_obs" rows="2" style="width:100%" placeholder="Ex.: na verdade foi um serviço de visita técnica para o cliente Fulano" oninput="ix.fila[ix.i].obs=this.value">${esc(r.obs || '')}</textarea>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">${['Na verdade foi serviço prestado', 'Produto já tinha saído do estoque (venda antiga)', 'Produto comprado fora do estoque (pessoa física)', 'Cliente não quis informar os dados'].map((t) => `<button class="btn btn-sm" onclick="ixObs('${t}')">+ ${t}</button>`).join('')}</div></div>
+    <div class="card" id="ix_gar">${garHTML('ix_gar', r.gar, garDescPadrao(r.itens))}</div>
     <div class="card"><h3 style="margin-top:0">💰 Pagamento ${r.pags.length ? `<small class="muted" style="font-weight:400;text-transform:none">na nota: ${esc(r.pags.map((x) => `${x.forma || 'outros'} ${brl(x.valor)}`).join(' + '))}</small>` : ''}</h3>${pgHtml}</div>
 `}
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-bottom:30px">
@@ -1718,6 +1842,7 @@ async function ixImportar() {
   if (semProd >= 0) return toast(`Escolha o produto do estoque para "${r.itens[semProd].xProd}" (ou "Não vincular")`, 'erro');
   if (r.itens.some((it) => it.tipo === 'servico' && !String(it.desc || '').trim())) return toast('Preencha a descrição do serviço', 'erro');
   if (r.itens.some((it) => it.tipo === 'produto') && !r.bx) return toast('Responda se esta venda mexe no estoque', 'erro');
+  if (!garValida(r.gar)) return;
   const lista = r.pg === 'caixa' ? r.pgs : r.pg === 'prazo' ? r.parc : [];
   if (r.pg === 'caixa' && r.pgs.some((g) => !g.forma)) return toast('Escolha a forma de pagamento', 'erro');
   if (r.pg !== 'nada') {
@@ -1746,6 +1871,7 @@ async function ixImportar() {
   $('#ix_go').disabled = true;
   const { data, error } = await sb.rpc('importar_venda_xml', { p: payload });
   if (error) { $('#ix_go').disabled = false; return erro(error); }
+  if (r.gar?.on) await garSalvar(r.gar, data.id, dataLocalISO(r.data));
   ix.feitos.push({ id: data.id, modelo: r.modelo, numero: r.numero, total: data.total, cliente: r.cli.modo === 'novo' ? c.nome : r.cli.id ? (r.cli.nomeNota ? c.nome : cli(r.cli.id)?.nome) : 'Consumidor' });
   // aprende os vínculos para as próximas notas desta mesma importação
   r.itens.forEach((it) => {
@@ -1781,7 +1907,7 @@ function periodo() {
 }
 function telaVendas() {
   $('#main').innerHTML = `
-    <div class="pagehead"><h1>Vendas e saídas</h1><div class="actions">${isAdmin ? `<input type="file" id="vx_file" accept=".xml,text/xml" multiple class="hide" onchange="importarVendasXML(this.files);this.value=''"><button class="btn" onclick="$('#vx_file').click()" title="Importa NF-e, cupom (NFC-e) ou nota de serviço (NFS-e) emitidos em outro sistema">📥 Importar XML de venda</button>` : ''}<button class="btn btn-primary" onclick="venda.tipo='venda';ir('vender')">🛒 Nova venda</button><button class="btn" onclick="venda.tipo='saida';ir('vender')">📤 Saída sem venda</button></div></div>
+    <div class="pagehead"><h1>Vendas e saídas</h1><div class="actions">${isAdmin ? `<input type="file" id="vx_file" accept=".xml,text/xml" multiple class="hide" onchange="importarVendasXML(this.files);this.value=''"><button class="btn" onclick="$('#vx_file').click()" title="Importa NF-e, cupom (NFC-e) ou nota de serviço (NFS-e) emitidos em outro sistema">📥 Importar XML de venda</button>` : ''}<button class="btn" onclick="telaGarantias()">🛡 Garantias</button><button class="btn btn-primary" onclick="venda.tipo='venda';ir('vender')">🛒 Nova venda</button><button class="btn" onclick="venda.tipo='saida';ir('vender')">📤 Saída sem venda</button></div></div>
     <div class="card filtros">
       <select id="vf_per" onchange="vfil.per=this.value;$('#vf_custom').classList.toggle('hide',this.value!=='custom');listaVendas()">
         ${[['hoje', 'Hoje'], ['7', 'Últimos 7 dias'], ['mes', 'Este mês'], ['mesant', 'Mês passado'], ['custom', 'Escolher datas']].map(([v, t]) => `<option value="${v}" ${vfil.per === v ? 'selected' : ''}>${t}</option>`).join('')}
@@ -1853,11 +1979,19 @@ async function verVenda(id, recemFeita) {
       <div style="text-align:right;margin-top:10px;font-size:20px">Total: <b>${brl(v.total)}</b></div>
       ${isAdmin ? `<div style="text-align:right" class="muted">Custo ${brl(tc)} · Lucro <b style="color:var(--ok)">${brl(v.total - tc)}</b></div>` : ''}`}
       ${v.observacao ? `<p class="hint">Obs.: ${esc(v.observacao)}</p>` : ''}
+      ${sd ? '' : `<div id="vv_gar"></div>`}
       <div id="vv_fin"></div>
     `, `${isAdmin && v.status === 'concluida' ? `<button class="btn btn-danger" style="margin-right:auto" onclick="cancelarVenda(${v.id})">Cancelar ${sd ? 'saída' : 'venda'}</button>` : ''}${isAdmin && !sd && v.status === 'concluida' && !v.venda_itens.some((i) => i.tipo === 'servico') ? `<button class="btn" onclick="converterSaida(${v.id})">📤 Transformar em saída sem venda</button>` : ''}<button class="btn" onclick="closeModal()">Fechar</button><button class="btn btn-primary" onclick='imprimirRecibo(${v.id})'>🖨 Imprimir comprovante</button>`, true);
     window._vendaAtual = v;
+    if (!sd) garantiasDaVenda(v);
     if (isAdmin && !sd && v.status === 'concluida') vendaFinanceiro(v);
   } catch (e) { erro(e); }
+}
+async function garantiasDaVenda(v) {
+  const el = $('#vv_gar'); if (!el) return;
+  const { data: gs } = await sb.from('garantias').select('*').eq('venda_id', v.id).order('id');
+  el.innerHTML = `<div style="margin-top:12px">${(gs || []).map((g) => garCard(g, false)).join('')}
+    ${v.status === 'concluida' ? `<button class="btn btn-sm" style="margin-top:8px" onclick="formGarantia(${v.id})">🛡 ${(gs || []).length ? 'Adicionar outra garantia' : 'Registrar garantia nesta venda'}</button>` : ''}</div>`;
 }
 function imprimirRecibo() {
   const v = window._vendaAtual; if (!v) return;
@@ -3339,7 +3473,7 @@ async function mudarPapel(id, papel) {
 }
 async function backupJSON() {
   try {
-    const t = ['config', 'recibos', 'bancos', 'categorias', 'caixa', 'contas', 'conta_pagamentos', 'produtos', 'produto_custos', 'notas', 'codigos_fornecedor', 'entradas', 'ajustes', 'clientes', 'precos_cliente', 'servicos', 'vendas', 'venda_itens', 'venda_custos'];
+    const t = ['config', 'recibos', 'bancos', 'categorias', 'caixa', 'contas', 'conta_pagamentos', 'garantias', 'produtos', 'produto_custos', 'notas', 'codigos_fornecedor', 'entradas', 'ajustes', 'clientes', 'precos_cliente', 'servicos', 'vendas', 'venda_itens', 'venda_custos'];
     const out = { gerado_em: new Date().toISOString() };
     for (const n of t) out[n] = await fetchAll(() => sb.from(n).select('*'));
     baixar(`backup-estoque-beto-${hojeISO()}.json`, JSON.stringify(out, null, 1), 'application/json');
